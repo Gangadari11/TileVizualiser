@@ -12,7 +12,7 @@ import time
 
 # ================= CONFIG =================
 # Get your FREE token from: https://replicate.com/account/api-tokens
-REPLICATE_API_TOKEN = "r8_1f6erp5cZANvmjHyfdDD1IQPRX6Wc8C2x94Vr"  # ⬅️ REPLACE THIS
+REPLICATE_API_TOKEN = ""  # ⬅️ REPLACE THIS
 
 ROOM_IMAGE_PATH = "room.jpg"
 TILE_IMAGE_PATH = "tile.jpg"

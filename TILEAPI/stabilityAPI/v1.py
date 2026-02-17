@@ -7,7 +7,7 @@ import stability_sdk.interfaces.gooseai.generation.generation_pb2 as generation
 
 # ================= CONFIG =================
 os.environ['STABILITY_HOST'] = 'grpc.stability.ai:443'
-os.environ['STABILITY_KEY'] = 'sk-vsfo9rx6OPllQgpaFsKP5BsiuFqfw1YPShwq9Uw3cDm4p4p5'
+os.environ['STABILITY_KEY'] = ''
 
 ROOM_IMAGE_PATH = "room2.jpg"
 TILE_IMAGE_PATH = "tile.jpg"

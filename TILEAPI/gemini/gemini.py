@@ -2,7 +2,7 @@ import vertexai
 from vertexai.preview.vision_models import ImageGenerationModel, Image
 
 # 1. SETUP - Replace with your actual Project ID
-PROJECT_ID = "tile-visualizer-487608" 
+PROJECT_ID = "" 
 vertexai.init(project=PROJECT_ID, location="us-central1")
 
 def run_visualization():

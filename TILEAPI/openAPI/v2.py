@@ -5,7 +5,7 @@ import requests
 from io import BytesIO
 
 # ================= CONFIG =================
-OPENAI_API_KEY = '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'
+OPENAI_API_KEY = ''
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 ROOM_IMAGE_PATH = "room.jpg"
