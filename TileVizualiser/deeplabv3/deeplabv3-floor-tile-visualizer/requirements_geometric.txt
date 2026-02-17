@@ -1,0 +1,22 @@
+# Requirements for Interactive Geometric Floor Tile Visualizer
+# Computer Vision + Geometric Projection System
+
+# Core Computer Vision
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+
+# Numerical Computing
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Image Segmentation
+scikit-image>=0.21.0
+
+# Utilities
+Pillow>=9.5.0
+
+# Optional: YAML config parsing (if using config files)
+pyyaml>=6.0
+
+# Note: This system uses pure computer vision and geometric methods
+# No deep learning or AI models required for basic functionality!

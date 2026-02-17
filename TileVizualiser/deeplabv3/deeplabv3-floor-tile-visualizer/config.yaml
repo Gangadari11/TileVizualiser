@@ -1,0 +1,75 @@
+# ====================================================================
+# Floor Tile Visualizer Configuration
+# ====================================================================
+
+# INPUT SETTINGS
+# ====================================================================
+room_image_path: "assets/room.jpg"  # Path to the room image to process
+tile_image_path: "assets/tile.jpg"  # Path to tile texture image
+
+# MODEL SETTINGS
+# ====================================================================
+model_path: "models/deeplabv3_resnet101_coco-586e9e4e.pth"  # Path to DeepLabV3 model
+model_type: "advanced"  # Options: deeplabv3, power_combo, advanced
+                        # "advanced" = Industry-level with SAM + MiDaS + Multi-AI
+
+# FLOOR DETECTION SETTINGS
+# ====================================================================
+force_floor_detection: false  # Use intelligent AI-based detection (recommended)
+                              # The AI will properly identify floor vs furniture
+                              
+use_advanced_detection: true  # Use multi-strategy detection (for deeplabv3 mode)
+
+confidence_threshold: 0.50    # Detection threshold (CONSERVATIVE for accuracy)
+                              # Higher = more strict, less false positives
+                              # 0.45-0.55 recommended for bedrooms with furniture
+                              
+min_floor_area: 500           # Minimum area in pixels to consider as floor
+
+# ADVANCED MODE SETTINGS (when model_type = "advanced")
+# ====================================================================
+advanced_mode:
+  use_sam: true              # Use Segment Anything Model for precise segmentation
+  use_depth_estimation: true # Use MiDaS for depth-based floor detection
+  sam_checkpoint: "sam_vit_b_01ec64.pth"  # Path to SAM checkpoint
+
+# TILE APPLICATION SETTINGS
+# ====================================================================
+tile:
+  size: 80                 # Tile size in pixels (optimal for pattern visibility)
+                           # 55-80 recommended for most floors
+  grout_color: [180, 180, 180]  # Grout line color (RGB)
+  grout_width: 2           # Grout line width in pixels
+
+# ADVANCED RENDERING SETTINGS (when model_type = "advanced")
+# ====================================================================
+advanced_rendering:
+  enable_perspective: true    # Enable perspective-aware tile placement
+  enable_lighting: true       # Integrate original room lighting
+  enable_grout: true          # Add realistic grout lines
+  tile_variation: true        # Add subtle brightness variation to tiles
+  anti_aliasing: true         # Enable sub-pixel anti-aliasing
+
+# IMAGE PROCESSING
+# ====================================================================
+target_size: [512, 512]    # Input size for model processing
+blend_alpha: 0.95          # Tile opacity (strong visibility)
+                           # 0.90-0.95 = Strong tile visibility (recommended)
+                           # 0.85-0.89 = Balanced blend
+                           # 0.85-0.90 = Balanced blend
+                           # 0.70-0.80 = Subtle effect
+
+# OUTPUT SETTINGS
+# ====================================================================
+output_dir: "outputs"      # Directory to save output files
+output_image_path: "outputs/result.jpg"  # Path to save the final tiled result
+save_intermediate: true    # Save floor mask and detection visualization
+
+output:
+  show_results: false      # Display results in window (set to true for visual preview)
+
+# LOGGING
+# ====================================================================
+logging:
+  level: "INFO"            # Logging level: DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/app.log" # Path to log file
