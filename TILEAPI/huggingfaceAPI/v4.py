@@ -17,7 +17,7 @@ OUTPUT_IMAGE_PATH = "room_with_tile_v4.png"
 MASK_PATH = "mask_v4.png"
 
 # Hugging Face API Configuration
-HF_API_TOKEN = "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" # Set your token in environment or below
+HF_API_TOKEN = "" # Set your token in environment or below
 # Or set directly: HF_API_TOKEN = "hf_your_token_here"
 
 # Available inpainting models on Hugging Face (updated for 2026)
