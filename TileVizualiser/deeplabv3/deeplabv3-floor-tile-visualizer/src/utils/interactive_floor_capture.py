@@ -46,6 +46,12 @@ class InteractiveFloorCapture:
         self.mode = 'polygon'  # 'polygon' or 'scribble'
         self.brush_size = 15
         
+        # Edit state
+        self.selected_poly_idx = -1
+        self.selected_vertex_idx = -1
+        self.is_dragging = False
+        self.drag_threshold = 15  # pixels
+        
         # Pre-compute segmentation for refinement
         print("🔍 Computing superpixel segmentation...")
         self._compute_segmentation()
@@ -98,15 +104,85 @@ class InteractiveFloorCapture:
         Set capture mode
         
         Args:
-            mode: 'polygon' or 'scribble'
+            mode: 'polygon', 'scribble', or 'edit'
         """
-        if mode in ['polygon', 'scribble']:
+        if mode in ['polygon', 'scribble', 'edit']:
             self.mode = mode
-            print(f"📍 Mode set to: {mode}")
+            print(f"📍 Mode set to: {mode.upper()}")
+            
+            if mode == 'edit':
+                print("   • Click & drag vertices to move")
+                print("   • Right-click to delete vertex")
+                print("   • Double-click line to add vertex")
         else:
-            print(f"⚠️ Invalid mode: {mode}. Use 'polygon' or 'scribble'")
+            print(f"⚠️ Invalid mode: {mode}. Use 'polygon', 'scribble', or 'edit'")
     
-    def add_polygon_point(self, x: int, y: int):
+    def handle_mouse_edit(self, event, x, y):
+        """Handle mouse events for editing mode"""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # Check if clicked on a vertex
+            found = False
+            for p_idx, poly in enumerate(self.completed_polygons):
+                for v_idx, point in enumerate(poly):
+                    if np.sqrt((x - point[0])**2 + (y - point[1])**2) < self.drag_threshold:
+                        self.selected_poly_idx = p_idx
+                        self.selected_vertex_idx = v_idx
+                        self.is_dragging = True
+                        found = True
+                        print(f"   Selected vertex {v_idx} of polygon {p_idx}")
+                        break
+                if found: break
+            
+            if not found:
+                # Check if clicked on an edge (to add vertex)
+                for p_idx, poly in enumerate(self.completed_polygons):
+                    for i in range(len(poly)):
+                        p1 = poly[i]
+                        p2 = poly[(i + 1) % len(poly)]
+                        
+                        # Distance from point to line segment
+                        v1 = np.array([p2[0] - p1[0], p2[1] - p1[1]])
+                        v2 = np.array([x - p1[0], y - p1[1]])
+                        seg_len_sq = np.sum(v1**2)
+                        
+                        if seg_len_sq == 0: continue
+                        
+                        t = np.dot(v2, v1) / seg_len_sq
+                        t = max(0, min(1, t))
+                        
+                        projection = p1 + t * v1
+                        dist = np.sqrt((x - projection[0])**2 + (y - projection[1])**2)
+                        
+                        if dist < self.drag_threshold:
+                            # Insert new vertex
+                            poly.insert(i + 1, (x, y))
+                            self.selected_poly_idx = p_idx
+                            self.selected_vertex_idx = i + 1
+                            self.is_dragging = True
+                            print(f"   ➕ Added vertex to polygon {p_idx}")
+                            return
+
+        elif event == cv2.EVENT_MOUSEMOVE:
+            if self.is_dragging and self.selected_poly_idx >= 0:
+                self.completed_polygons[self.selected_poly_idx][self.selected_vertex_idx] = (x, y)
+
+        elif event == cv2.EVENT_LBUTTONUP:
+            self.is_dragging = False
+            self.selected_poly_idx = -1
+            self.selected_vertex_idx = -1
+
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            # Delete vertex
+            for p_idx, poly in enumerate(self.completed_polygons):
+                for v_idx, point in enumerate(poly):
+                    if np.sqrt((x - point[0])**2 + (y - point[1])**2) < self.drag_threshold:
+                        if len(poly) > 3:
+                            poly.pop(v_idx)
+                            print(f"   🗑️ Deleted vertex {v_idx} from polygon {p_idx}")
+                        else:
+                            print("   ⚠️ Cannot delete vertex (polygon needs at least 3 points)")
+                        return
+
         """Add a point to the current polygon"""
         self.polygon_points.append((x, y))
         print(f"   Point {len(self.polygon_points)}: ({x}, {y})")

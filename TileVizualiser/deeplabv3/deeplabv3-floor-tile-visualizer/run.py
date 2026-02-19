@@ -731,18 +731,57 @@ def run_interactive_tile_workflow(room_image: np.ndarray,
     print(f"   ✓ Tile texture: {tile_texture.shape[1]}x{tile_texture.shape[0]}")
     
     # =================================================================
+    # PHASE 0: AUTOMATIC INITIAL DETECTION
+    # =================================================================
+    print("\n" + "="*70)
+    print("PHASE 0: PRE-COMPUTING FLOOR AREA")
+    print("="*70)
+    
+    # Run simple detection to get a starting point
+    try:
+        initial_mask = simple_floor_detection(room_image, auto_mode=True)
+        
+        # Convert initial mask to polygons
+        contours, _ = cv2.findContours(initial_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        initial_polygons = []
+        for cnt in contours:
+            # Simplify contour to reduce points (Ramer-Douglas-Peucker)
+            epsilon = 0.005 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            
+            # Convert to list of tuples
+            poly_points = [(pt[0][0], pt[0][1]) for pt in approx]
+            
+            # Filter small noise polys
+            if cv2.contourArea(approx) > (room_image.shape[0] * room_image.shape[1] * 0.05):
+                initial_polygons.append(poly_points)
+                
+        print(f"   ✓ Auto-detected {len(initial_polygons)} main floor regions")
+        
+    except Exception as e:
+        print(f"⚠️ Initial detection skipped due to error: {e}")
+        initial_polygons = []
+
+    # =================================================================
     # PHASE 1: INTERACTIVE FLOOR CAPTURE (Multi-Polygon)
     # =================================================================
     print("\n" + "="*70)
     print("PHASE 1: MULTI-POLYGON FLOOR CAPTURE")
     print("="*70)
     print("\n🎮 Instructions:")
-    print("   • Click to add points for polygon")
+    print("   • Starting with AUTO-DETECTED floor area")
+    print("   • Click to add points to NEW polygon")
+    print("   • Press [d] to delete last polygon if incorrect")
+    print("   • Press [c] to clear ALL polygons and start fresh")
     print("   • Press SPACE to finish current polygon")
-    print("   • Add multiple polygons for discontinuous areas")
-    print("   • Press ENTER when all polygons are complete")
+    print("   • Press ENTER when happy with selection")
     
     capture = InteractiveFloorCapture(room_image)
+    
+    # Load initial polygons
+    if initial_polygons:
+        capture.completed_polygons = initial_polygons
     
     # Create window
     window_capture = "Floor Capture - Multi-Polygon (Click points, SPACE=finish, ENTER=done)"
@@ -751,7 +790,10 @@ def run_interactive_tile_workflow(room_image: np.ndarray,
     
     # Mouse callback
     def mouse_callback(event, x, y, flags, param):
-        if capture.mode == 'polygon':
+        if hasattr(capture, 'mode') and capture.mode == 'edit':
+             if hasattr(capture, 'handle_mouse_edit'):
+                 capture.handle_mouse_edit(event, x, y)
+        elif capture.mode == 'polygon':
             if event == cv2.EVENT_LBUTTONDOWN:
                 capture.add_polygon_point(x, y)
         elif capture.mode == 'scribble':
@@ -765,19 +807,22 @@ def run_interactive_tile_workflow(room_image: np.ndarray,
     
     cv2.setMouseCallback(window_capture, mouse_callback)
     
+    # Start in EDIT mode if we have auto-detected polygons
+    if initial_polygons:
+        capture.set_mode('edit')
+        current_mode = 'edit'
+    else:
+        current_mode = 'polygon'
+
     print("\n🎮 CONTROLS:")
-    print("   [p] - Polygon mode (click to add points)")
-    print("   [s] - Scribble mode (drag to draw)")
-    print("   [SPACE] - Finish current polygon and start new one")
-    print("   [d] - Delete last completed polygon")
-    print("   [r] - Refine mask (region growing)")
-    print("   [u] - Refine mask (superpixel)")
-    print("   [e] - Refine mask (edge snapping)")
+    print("   [e] - EDIT MODE (Drag points, double-click lines to add, right-click to delete)")
+    print("   [p] - Polygon mode (Add new polygons)")
+    print("   [s] - Scribble mode (Draw freely)")
+    print("   [SPACE] - Finish current polygon")
+    print("   [d] - Delete last polygon")
     print("   [c] - Clear ALL polygons")
-    print("   [ENTER] - Finish capture and proceed")
-    print("   [ESC] - Quit")
+    print("   [ENTER] - CONFIRM SELECTION & PROCEED")
     
-    current_mode = 'polygon'
     current_mask = None
     show_help = True
     
@@ -785,46 +830,58 @@ def run_interactive_tile_workflow(room_image: np.ndarray,
         # Create display
         display = room_image.copy()
         
-        # Draw rough mask (all polygons combined)
-        rough_mask = capture.get_rough_mask()
-        if np.any(rough_mask > 0):
-            overlay = display.copy()
-            overlay[rough_mask > 0] = [0, 255, 0]
-            display = cv2.addWeighted(display, 0.7, overlay, 0.3, 0)
+        # 1. Draw completed polygons
+        for p_idx, poly in enumerate(capture.completed_polygons):
+            # Draw filled (transparent)
+            if len(poly) >= 3:
+                pts = np.array(poly, np.int32)
+                overlay = display.copy()
+                color_fill = (0, 255, 0) if p_idx != capture.selected_poly_idx else (0, 165, 255)
+                cv2.fillPoly(overlay, [pts], color_fill)
+                cv2.addWeighted(overlay, 0.3, display, 0.7, 0, display)
+                
+                # Draw border
+                thickness = 2 if p_idx != capture.selected_poly_idx else 3
+                cv2.polylines(display, [pts], True, color_fill, thickness)
         
-        # Draw all completed polygons
-        for idx, poly_points in enumerate(capture.completed_polygons):
-            color = (0, 255, 255)  # Yellow for completed
-            for i, pt in enumerate(poly_points):
-                cv2.circle(display, pt, 8, color, -1)
-            # Draw lines
-            if len(poly_points) > 1:
-                for i in range(len(poly_points)):
-                    pt1 = poly_points[i]
-                    pt2 = poly_points[(i + 1) % len(poly_points)]
-                    cv2.line(display, pt1, pt2, color, 4)
-            
-            # Label
-            if len(poly_points) > 0:
-                centroid_x = int(np.mean([pt[0] for pt in poly_points]))
-                centroid_y = int(np.mean([pt[1] for pt in poly_points]))
-                cv2.putText(display, f"Poly {idx + 1}", (centroid_x - 30, centroid_y),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        
-        # Draw current polygon being drawn
-        if current_mode == 'polygon':
-            for i, pt in enumerate(capture.polygon_points):
-                cv2.circle(display, pt, 10, (0, 0, 255), -1)
-                cv2.putText(display, str(i + 1), (pt[0] + 10, pt[1] - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            
-            if len(capture.polygon_points) > 1:
-                for i in range(len(capture.polygon_points) - 1):
-                    cv2.line(display, capture.polygon_points[i], 
-                            capture.polygon_points[i + 1], (0, 255, 255), 4)
-        
+        # 2. Draw vertices (in EDIT mode)
+        if capture.mode == 'edit':
+             for p_idx, poly in enumerate(capture.completed_polygons):
+                for v_idx, pt in enumerate(poly):
+                    # Highlight selected vertex
+                    v_color = (0, 255, 0)
+                    v_size = 5
+                    
+                    if p_idx == capture.selected_poly_idx and v_idx == capture.selected_vertex_idx:
+                        v_color = (0, 0, 255) # Red for selected
+                        v_size = 8
+                    elif p_idx == capture.selected_poly_idx:
+                        v_color = (0, 165, 255) # Orange for selected poly
+                        
+                    cv2.circle(display, pt, v_size, v_color, -1)
+                    if p_idx == capture.selected_poly_idx and v_idx == capture.selected_vertex_idx:
+                        cv2.circle(display, pt, v_size+2, (255, 255, 255), 2)
+
+        # 3. Draw current polygon being drawn (in POLYGON mode)
+        elif capture.mode == 'polygon':
+             if len(capture.polygon_points) > 0:
+                pts = np.array(capture.polygon_points, np.int32)
+                cv2.polylines(display, [pts], False, (0, 0, 255), 2)
+                for i, pt in enumerate(capture.polygon_points):
+                    cv2.circle(display, pt, 5, (0, 0, 255), -1)
+                # Guide line
+                if len(capture.polygon_points) > 0:
+                    # We don't have mouse position here without storage, skip guide line for now
+                    pass
+
+        # 4. Draw scribble (in SCRIBBLE mode)
+        if capture.mode == 'scribble' and np.sum(capture.scribble_mask) > 0:
+            scribble_vis = np.zeros_like(display)
+            scribble_vis[capture.scribble_mask > 0] = [0, 0, 255]
+            display = cv2.addWeighted(display, 1.0, scribble_vis, 0.5, 0)
+
         # Display mode and help
-        mode_text = f"Mode: {current_mode.upper()} | Polygons: {capture.get_polygon_count()}"
+        mode_text = f"Mode: {capture.mode.upper()} | Polygons: {capture.get_polygon_count()}"
         cv2.putText(display, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         
         if show_help:
@@ -1114,8 +1171,8 @@ def main():
     # ============================================================
     # CHANGE THESE DEFAULTS TO SWITCH ROOM/TILE IMAGES:
     # ============================================================
-    DEFAULT_ROOM = 'assets/room.jpg'    # Change to: room2.jpg, room3.jpg, etc.
-    DEFAULT_TILE = 'assets/tile2.jpg'    # Change to: tile2.jpg, tile3.jpg, etc.
+    DEFAULT_ROOM = 'assets/room3.jpg'    # Change to: room2.jpg, room3.jpg, etc.
+    DEFAULT_TILE = 'assets/tile.jpg'    # Change to: tile2.jpg, tile3.jpg, etc.
     # ============================================================
     
     parser.add_argument('--image', '-i', type=str, default=DEFAULT_ROOM,
