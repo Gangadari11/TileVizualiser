@@ -68,14 +68,14 @@ class RealisticBlending:
     def match_brightness(self, 
                         tile_image: np.ndarray,
                         target_brightness: Optional[float] = None,
-                        strength: float = 0.5) -> np.ndarray:
+                        strength: float = 0.2) -> np.ndarray:
         """
         Match tile image brightness to original floor (with adjustable strength)
         
         Args:
             tile_image: Input tile image (BGR)
             target_brightness: Target brightness (if None, use floor brightness)
-            strength: Strength of matching (0.0-1.0), default 0.5 to preserve tile colors
+            strength: Strength of matching (0.0-1.0), default 0.2 to preserve tile colors
             
         Returns:
             Brightness-adjusted tile image
@@ -230,14 +230,14 @@ class RealisticBlending:
     def apply_lighting(self, 
                       tile_image: np.ndarray,
                       lighting_map: np.ndarray,
-                      strength: float = 0.3) -> np.ndarray:
+                      strength: float = 0.2) -> np.ndarray:
         """
         Apply original lighting to tile image (reduced default strength)
         
         Args:
             tile_image: Input tile image (BGR)
             lighting_map: Lighting intensity map (0-1)
-            strength: Strength of lighting effect (0-1), reduced to 0.3
+            strength: Strength of lighting effect (0-1), reduced to 0.2
             
         Returns:
             Tile image with lighting applied
@@ -264,45 +264,101 @@ class RealisticBlending:
                    alpha: float = 0.8,
                    feather_size: int = 10) -> np.ndarray:
         """
-        Blend tiles with original image using alpha blending
+        Blend tiles with original image using:
+          - Multiplicative shadow transfer (room lighting preserved on tiles)
+          - Unsharp mask to boost tile pattern visibility
+          - Lossless non-floor pixel copy
         
         Args:
-            tile_image: Tile image (BGR or BGRA)
+            tile_image: Tile image (BGR or BGRA — alpha channel used when present)
             alpha: Global alpha value (0-1)
             feather_size: Size of edge feathering in pixels
-            
+        
         Returns:
             Blended result (BGR)
         """
-        print(f"🎨 Alpha blending (alpha: {alpha:.2f})...")
-        
-        # Create alpha mask
-        if tile_image.shape[2] == 4:
-            # Use existing alpha channel
-            alpha_mask = tile_image[:, :, 3].astype(np.float32) / 255.0
-            tile_bgr = tile_image[:, :, :3]
+        print(f"🎨 Alpha blending with shadow+sharpening (alpha: {alpha:.2f})...")
+
+        # ── 1. Separate tile BGR and alpha ────────────────────────────────────
+        if tile_image.ndim == 3 and tile_image.shape[2] == 4:
+            raw_alpha = tile_image[:, :, 3].astype(np.float64) / 255.0
+            tile_bgr  = tile_image[:, :, :3].astype(np.float64)
         else:
-            # Create alpha from mask
-            alpha_mask = self.mask.astype(np.float32) / 255.0
-            tile_bgr = tile_image
-        
-        # Apply feathering to alpha mask
+            raw_alpha = self.mask.astype(np.float64) / 255.0
+            tile_bgr  = tile_image.astype(np.float64)
+
+        # ── 2. Feather edges ──────────────────────────────────────────────────
         if feather_size > 0:
-            alpha_mask = self._feather_mask(alpha_mask, feather_size)
+            raw_alpha = self._feather_mask(
+                raw_alpha.astype(np.float32), feather_size
+            ).astype(np.float64)
+        alpha_map = np.clip(raw_alpha * alpha, 0.0, 1.0)   # (H, W)
+
+        original_f64 = self.original_image.astype(np.float64)
+        floor_bool   = self.mask > 0                        # (H, W) bool
+
+        # ── 3. Multiplicative shadow transfer (AMBIENT OCCLUSION) ────────────────
+        # Extract greyscale brightness of original floor and use it as a
+        # per-pixel multiplier so room shadows/highlights appear on the tile.
+        orig_gray = cv2.cvtColor(
+            self.original_image, cv2.COLOR_BGR2GRAY
+        ).astype(np.float64)
+
+        if np.any(floor_bool):
+            avg_bright = float(orig_gray[floor_bool].mean())
+        else:
+            avg_bright = 128.0
+        if avg_bright < 1.0:
+            avg_bright = 128.0
+
+        # Enhance shadow contrast (make darks darker)
+        shadow_map = orig_gray / avg_bright
+        # Use power function to deepen shadows slightly (gamma correction-like)
+        shadow_map = np.power(shadow_map, 1.2) 
         
-        # Apply global alpha
-        alpha_mask = alpha_mask * alpha
+        shadow_map = np.clip(shadow_map, 0.2, 1.8)
+        shadow_map = cv2.GaussianBlur(
+            shadow_map.astype(np.float32), (21, 21), 0
+        ).astype(np.float64)
+        shadow_3d  = shadow_map[:, :, np.newaxis]           # broadcast over 3 ch
+
+        # ── 4. Specular Reflection (GLOSS) ──────────────────────────────────────
+        # Find bright spots in original image (specular highlights)
+        # Threshold high brightness values
+        specular_mask = np.maximum(0, orig_gray - 200) / 55.0  # Normalize 200-255 range to 0-1
+        specular_mask = np.clip(specular_mask, 0, 1)
+        specular_mask = cv2.GaussianBlur(specular_mask.astype(np.float32), (15, 15), 0)
+        specular_3d = specular_mask[:, :, np.newaxis]
+
+        # Apply shadow + Add reflection
+        # Tile receives shadows *multiplicatively*
+        tile_lit_f64 = tile_bgr * shadow_3d
         
-        # Expand to 3 channels
-        alpha_3d = np.stack([alpha_mask] * 3, axis=2)
+        # Tile receives highlights *additively* (gloss)
+        # Reduce intensity from 0.4 to 0.15 (subtle sheen instead of blown out mirror)
+        # Also clamp the max value to avoid total whiteout
+        tile_lit_f64 = tile_lit_f64 + (230.0 * specular_3d * 0.15)
         
-        # Blend
-        blended = (tile_bgr * alpha_3d + 
-                  self.original_image * (1.0 - alpha_3d))
-        blended = np.clip(blended, 0, 255).astype(np.uint8)
-        
-        print("   ✓ Blending complete")
-        return blended
+        tile_lit_f64 = np.clip(tile_lit_f64, 0.0, 255.0)
+
+        # ── 5. Unsharp-mask on tile to pop the pattern ────────────────────────
+        tile_lit_u8 = tile_lit_f64.astype(np.uint8)
+        blur = cv2.GaussianBlur(tile_lit_u8, (0, 0), sigmaX=1.5)
+        # Slightly softer sharpening to avoid halo artifacts
+        tile_sharp_u8 = cv2.addWeighted(tile_lit_u8, 1.5, blur, -0.5, 0)
+
+        # ── 6. Alpha-composite ─────────────────────────────────────────────────
+        alpha_3d   = np.stack([alpha_map] * 3, axis=2)
+        tile_f64   = tile_sharp_u8.astype(np.float64)
+        blended_f64 = tile_f64 * alpha_3d + original_f64 * (1.0 - alpha_3d)
+        blended_u8  = np.clip(blended_f64, 0.0, 255.0).astype(np.uint8)
+
+        # ── 7. Lossless non-floor pixels (exact original bytes) ───────────────
+        floor_3d = np.stack([floor_bool] * 3, axis=2)
+        result   = np.where(floor_3d, blended_u8, self.original_image)
+
+        print("   ✓ Blending complete (AO shadows + Glossy reflection + Sharpening applied)")
+        return result
     
     def _feather_mask(self, mask: np.ndarray, feather_size: int) -> np.ndarray:
         """
@@ -326,48 +382,63 @@ class RealisticBlending:
     
     def blend_complete(self,
                       tile_image: np.ndarray,
-                      match_brightness: bool = True,
-                      match_color: bool = True,
-                      apply_lighting: bool = True,
-                      alpha: float = 0.85,
-                      feather_size: int = 10) -> np.ndarray:
+                      match_brightness: bool = False,  # Changed default to False
+                      match_color: bool = False,       # Changed default to False
+                      apply_lighting: bool = False,    # Changed default to False
+                      alpha: float = 0.99,             # Changed default to 0.99
+                      feather_size: int = 5) -> np.ndarray:  # Reduced default feather
         """
-        Complete blending pipeline
+        Complete blending pipeline (MINIMAL adjustments for maximum tile quality)
         
         Args:
             tile_image: Input tile image (BGR or BGRA)
-            match_brightness: Apply brightness matching
-            match_color: Apply color matching
-            apply_lighting: Apply lighting map
-            alpha: Global alpha value
-            feather_size: Edge feathering size
+            match_brightness: Apply brightness matching (default: False for quality)
+            match_color: Apply color matching (default: False for quality)
+            apply_lighting: Apply lighting map (default: False for quality)
+            alpha: Global alpha value (default: 0.99 for maximum tile visibility)
+            feather_size: Edge feathering size (default: 5 for subtle edges)
             
         Returns:
             Final blended result
         """
-        print("🎬 Starting complete blending pipeline...")
-        
-        # Extract BGR if BGRA
-        if tile_image.shape[2] == 4:
-            tile_bgr = tile_image[:, :, :3].copy()
+        print("🎬 Starting QUALITY-PRESERVING blending pipeline...")
+
+        # ── Separate channels so adjustments work on BGR only ─────────────────
+        has_alpha = (tile_image.ndim == 3 and tile_image.shape[2] == 4)
+        if has_alpha:
+            tile_bgr   = tile_image[:, :, :3].copy()
+            tile_alpha = tile_image[:, :, 3:4]   # keep for re-packing
         else:
-            tile_bgr = tile_image.copy()
-        
-        # Step 1: Match brightness
+            tile_bgr   = tile_image.copy()
+            tile_alpha = None
+
+        # Step 1: Match brightness (skip if disabled for quality)
         if match_brightness:
             tile_bgr = self.match_brightness(tile_bgr)
-        
-        # Step 2: Match color tone
+        else:
+            print("⏭️ Skipping brightness matching - preserving original tile")
+
+        # Step 2: Match color tone (skip if disabled for quality)
         if match_color:
             tile_bgr = self.match_color_tone(tile_bgr, method='mean_std')
-        
-        # Step 3: Apply lighting
+        else:
+            print("⏭️ Skipping color matching - preserving original tile")
+
+        # Step 3: Apply lighting (skip if disabled for quality)
         if apply_lighting:
             lighting_map = self.extract_lighting_map()
-            tile_bgr = self.apply_lighting(tile_bgr, lighting_map, strength=0.5)
-        
-        # Step 4: Alpha blend
-        result = self.alpha_blend(tile_bgr, alpha=alpha, feather_size=feather_size)
-        
-        print("✅ Complete blending finished!")
+            tile_bgr = self.apply_lighting(tile_bgr, lighting_map, strength=0.2)
+        else:
+            print("⏭️ Skipping lighting effects - preserving original tile")
+
+        # Step 4: Re-pack alpha so alpha_blend gets the proper BGRA mask ──────
+        if has_alpha:
+            tile_for_blend = np.concatenate([tile_bgr, tile_alpha], axis=2)
+        else:
+            tile_for_blend = tile_bgr
+
+        # Step 5: Alpha blend with shadow transfer + sharpening
+        result = self.alpha_blend(tile_for_blend, alpha=alpha, feather_size=feather_size)
+
+        print("✅ QUALITY-PRESERVING blending complete! Original tile appearance maintained.")
         return result

@@ -75,33 +75,89 @@ class PlaneApproximation:
     
     def compute_minimum_area_quad(self) -> np.ndarray:
         """
-        Compute minimum area quadrilateral that bounds the floor mask
+        Compute approximating quadrilateral that respects perspective.
+        Instead of a simple 2D minAreaRect (which fails for trapezoidal floor masks),
+        this finds the tightest convex quadrilateral that fits the floor mask,
+        prioritizing corners that align with the room's perspective.
         
         Returns:
             4 corner points (4 x 2 array) in order: top-left, top-right, bottom-right, bottom-left
         """
-        print("📐 Computing minimum area quadrilateral...")
+        print("📐 Computing perspective-aware quadrilateral...")
         
-        # First compute convex hull if not already done
+        # First compute convex hull
         if self.convex_hull_points is None:
             self.compute_convex_hull()
-        
+            
+        # Fallback if hull failed
         if self.convex_hull_points is None or len(self.convex_hull_points) < 4:
-            print("   ⚠️ Cannot compute quadrilateral")
             return self._get_bounding_box()
+            
+        # ── ROBUST QUADRILATERAL FITTING ──────────────────────────────────────
+        # We need to simplify the convex hull down to exactly 4 points.
+        # cv2.approxPolyDP with increasing epsilon is the standard robust way.
         
-        # Use minimum area rectangle as approximation
-        rect = cv2.minAreaRect(self.convex_hull_points.astype(np.float32))
-        box = cv2.boxPoints(rect)
-        box = box.astype(np.int32)
+        epsilon = 0.005 * cv2.arcLength(self.convex_hull_points, True)
+        max_epsilon = 0.1 * cv2.arcLength(self.convex_hull_points, True)
         
-        # Order points: top-left, top-right, bottom-right, bottom-left
-        ordered_box = self._order_quadrilateral_points(box)
+        approx = None
         
-        self.quad_points = ordered_box
-        print("   ✓ Quadrilateral computed")
+        # Iteratively increase epsilon until we get 4 points
+        # Start small to preserve detail, increase to force simplification
+        current_epsilon = epsilon
+        while current_epsilon < max_epsilon:
+            approx = cv2.approxPolyDP(self.convex_hull_points, current_epsilon, True)
+            
+            if len(approx) == 4:
+                # Found exactly 4 corners!
+                quad_reshaped = approx.reshape(4, 2).astype(np.float32)
+                # Ensure convex
+                if cv2.isContourConvex(approx):
+                    self.quad_points = self._order_quadrilateral_points(quad_reshaped)
+                    print("   ✓ Found exact 4-corner perspective quad via simplification")
+                    return self.quad_points
+                break # If not convex, break and use fallback
+            
+            elif len(approx) < 4:
+                # Oversimplified (triangle) - backtrack and force 4 points manually
+                break
+            
+            current_epsilon += 0.005 * cv2.arcLength(self.convex_hull_points, True)
+            
+        # Strategy 2: Geometric Extremes on Convex Hull (Robust Fallback)
+        # If simplification failed, we find the "corners" by looking for 
+        # points that are most extreme in the 4 diagonal directions.
+        # This works for any convex-ish shape (trapezoid, rotated rect, etc).
         
-        return ordered_box
+        print("   ⚠️ approxPolyDP failed, using geometric extremes fallback")
+        hull_pts = self.convex_hull_points.reshape(-1, 2)
+        
+        # Calculate sums and differences
+        # Top-Left: minimize (x + y)
+        # Bottom-Right: maximize (x + y)
+        sum_pts = hull_pts.sum(axis=1)
+        tl_idx = np.argmin(sum_pts)
+        br_idx = np.argmax(sum_pts)
+        
+        # Top-Right: maximize (x - y) <=> minimize (y-x)
+        # Bottom-Left: minimize (x - y) <=> maximize (y-x)
+        diff_pts = np.diff(hull_pts, axis=1).flatten() # y - x
+        
+        tr_idx = np.argmin(diff_pts) # min(y-x) is max(x-y) -> TR
+        bl_idx = np.argmax(diff_pts) # max(y-x) is min(x-y) -> BL
+        
+        corners = hull_pts[[tl_idx, tr_idx, br_idx, bl_idx]]
+        
+        # Ensure we have 4 distinct points (for very small/degenerate masks)
+        if len(np.unique(corners, axis=0)) < 4:
+             return self._get_bounding_box()
+
+        self.quad_points = self._order_quadrilateral_points(corners.astype(np.float32))
+        print("   ✓ Computed robust quad from hull extremes")
+        return self.quad_points
+        
+        # (Old fallback code removed - replaced by geometric extremes above)
+
     
     def _order_quadrilateral_points(self, points: np.ndarray) -> np.ndarray:
         """

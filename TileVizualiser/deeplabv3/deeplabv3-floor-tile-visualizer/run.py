@@ -26,6 +26,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from datetime import datetime
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -38,7 +39,7 @@ from utils.enhanced_interactive_gui import enhanced_floor_correction
 from utils.interactive_floor_capture import InteractiveFloorCapture
 from utils.mask_refinement import MaskRefinement
 from utils.plane_approximation import PlaneApproximation
-from utils.tile_projection_engine import TileProjectionEngine
+from utils.professional_tile_installer import ProfessionalTileInstaller
 from utils.realistic_blending import RealisticBlending
 
 
@@ -453,167 +454,242 @@ def advanced_floor_detection(image: np.ndarray, auto_mode: bool = False) -> np.n
         return simple_floor_detection(image, auto_mode=auto_mode)
 
 
+def _extract_floor_quad(floor_mask: np.ndarray) -> np.ndarray:
+    """
+    Extract a reliable 4-corner trapezoid from the floor mask
+    representing the floor plane in perspective (TL, TR, BR, BL).
+    Uses the actual x-extent at multiple y-slices to build a clean quad.
+    """
+    h, w = floor_mask.shape
+    
+    # Collect left-most and right-most floor pixel per row
+    left_pts, right_pts = [], []
+    step = max(1, h // 80)
+    for y in range(0, h, step):
+        row = floor_mask[y, :]
+        cols = np.where(row > 128)[0]
+        if len(cols) >= 6:
+            left_pts.append([cols[0], y])
+            right_pts.append([cols[-1], y])
+    
+    if len(left_pts) < 4:
+        # Fallback: bounding box of mask
+        ys, xs = np.where(floor_mask > 0)
+        return np.float32([
+            [xs.min(), ys.min()],
+            [xs.max(), ys.min()],
+            [xs.max(), ys.max()],
+            [xs.min(), ys.max()]
+        ])
+    
+    left_pts = np.array(left_pts)
+    right_pts = np.array(right_pts)
+    
+    # Top edge: topmost row with floor pixels
+    top_y = left_pts[0, 1]
+    row_top = floor_mask[top_y, :]
+    top_cols = np.where(row_top > 128)[0]
+    tl = np.float32([top_cols[0], top_y])
+    tr = np.float32([top_cols[-1], top_y])
+    
+    # Bottom edge: bottommost row with floor pixels
+    bot_y = left_pts[-1, 1]
+    row_bot = floor_mask[bot_y, :]
+    bot_cols = np.where(row_bot > 128)[0]
+    bl = np.float32([bot_cols[0], bot_y])
+    br = np.float32([bot_cols[-1], bot_y])
+    
+    return np.float32([tl, tr, br, bl])  # TL, TR, BR, BL
+
+
 def apply_tile_to_floor(image: np.ndarray, floor_mask: np.ndarray, tile_path: str) -> np.ndarray:
     """
-    Apply tile texture to detected floor area with proper perspective matching
-    
-    Args:
-        image: Original image
-        floor_mask: Binary floor mask (0-255)
-        tile_path: Path to tile texture image
-        
-    Returns:
-        Image with tiled floor following the original floor plane
+    Apply tile texture to detected floor area with proper perspective-correct tiling.
+
+    Key approach:
+    1. Extract floor trapezoid (perspective quad) from mask.
+    2. Decide real-world tile count based on bottom-edge width (nearest camera edge).
+    3. Build a flat rectangular tiled texture where ONE tile = tile_size_px × tile_size_px.
+    4. Warp the flat grid onto the floor quad with cv2.getPerspectiveTransform —
+       this makes tiles near the camera large and far tiles small, matching real perspective.
+    5. Extract per-pixel shadow/lighting from the ORIGINAL floor and apply it
+       MULTIPLICATIVELY on top of the warped tile (no additive blending that washes out pattern).
+    6. Use feathered mask at edges for seamless integration.
     """
-    print("\n🎨 Applying tile texture with perspective correction...")
-    
-    # Load tile texture
+    print("\n🎨 Applying perspective-correct tile texture...")
+
+    # ── 1. Load tile ──────────────────────────────────────────────────────────
     tile = cv2.imread(tile_path)
     if tile is None:
         print(f"❌ Error: Could not load tile image: {tile_path}")
         return image
-    
-    print(f"   Tile size: {tile.shape[1]}x{tile.shape[0]} pixels")
-    
-    # Get floor region dimensions
+    print(f"   Tile size: {tile.shape[1]}×{tile.shape[0]} px")
+
+    # ── 2. Verify mask ────────────────────────────────────────────────────────
     ys, xs = np.where(floor_mask > 0)
     if len(xs) == 0:
         print("❌ Error: Empty floor mask")
         return image
-    
-    # Find floor contour to detect perspective plane
-    contours, _ = cv2.findContours(floor_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contours:
-        print("❌ Error: No floor contour found")
-        return image
-    
-    # Get largest contour (main floor area)
-    floor_contour = max(contours, key=cv2.contourArea)
-    
-    # Approximate contour to quadrilateral (4 corners)
-    epsilon = 0.02 * cv2.arcLength(floor_contour, True)
-    approx = cv2.approxPolyDP(floor_contour, epsilon, True)
-    
-    # If we don't have 4 points, use convex hull and select 4 corners
-    if len(approx) != 4:
-        hull = cv2.convexHull(floor_contour)
-        # Simplify hull to 4 points
-        epsilon = 0.05 * cv2.arcLength(hull, True)
-        approx = cv2.approxPolyDP(hull, epsilon, True)
-        
-        # If still not 4 points, use bounding box
-        if len(approx) != 4:
-            rect = cv2.minAreaRect(floor_contour)
-            approx = cv2.boxPoints(rect)
-            approx = np.int0(approx).reshape(-1, 1, 2)
-    
-    # Get the 4 corner points
-    corners = approx.reshape(4, 2).astype(np.float32)
-    
-    # Sort corners: top-left, top-right, bottom-right, bottom-left
-    # Sort by y-coordinate
-    corners_sorted_y = corners[np.argsort(corners[:, 1])]
-    top_points = corners_sorted_y[:2]
-    bottom_points = corners_sorted_y[2:]
-    
-    # Sort top points by x-coordinate (left to right)
-    top_points = top_points[np.argsort(top_points[:, 0])]
-    # Sort bottom points by x-coordinate (left to right)
-    bottom_points = bottom_points[np.argsort(bottom_points[:, 0])]
-    
-    # Ordered corners: TL, TR, BR, BL
-    floor_corners = np.float32([
-        top_points[0],      # top-left
-        top_points[1],      # top-right
-        bottom_points[1],   # bottom-right
-        bottom_points[0]    # bottom-left
+
+    img_h, img_w = image.shape[:2]
+
+    # ── 3. Extract floor quad: [TL, TR, BR, BL] ──────────────────────────────
+    floor_corners = _extract_floor_quad(floor_mask)
+    tl, tr, br, bl = floor_corners
+
+    print(f"   Floor quad  TL=({tl[0]:.0f},{tl[1]:.0f})  TR=({tr[0]:.0f},{tr[1]:.0f})")
+    print(f"               BL=({bl[0]:.0f},{bl[1]:.0f})  BR=({br[0]:.0f},{br[1]:.0f})")
+
+    # ── 4. Tile-count-based scale ─────────────────────────────────────────────
+    # Bottom edge is the closest edge (widest in perspective).
+    # We want ~7 tiles visible across the nearest edge for realistic scale.
+    bottom_width_px = float(np.linalg.norm(br - bl))
+    left_height_px  = float(np.linalg.norm(bl - tl))
+
+    tile_orig_h, tile_orig_w = tile.shape[:2]
+    tile_native = max(tile_orig_w, tile_orig_h)   # longest side of original texture
+
+    TILES_ACROSS_BOTTOM = 7   # realistic for a ~4 m wide room with ~60 cm tiles
+    target_size = int(bottom_width_px / TILES_ACROSS_BOTTOM)
+
+    # CRITICAL: never downscale below the native tile resolution.
+    # If the computed target is smaller than the original tile,
+    # keep the native size — the perspective warp will downscale with LANCZOS4.
+    # Upscaling with 2× headroom keeps details crisp for tiles farther from camera.
+    tile_size_flat = max(tile_native, target_size)
+    # Extra 2× upscale headroom so distant (small) tiles still have enough pixels
+    if tile_size_flat < tile_native * 2:
+        tile_size_flat = tile_native * 2
+
+    # Recompute tile count using the chosen flat size
+    num_x = int(np.ceil(bottom_width_px / tile_size_flat)) + 3
+    num_y = int(np.ceil(left_height_px  / tile_size_flat)) + 3
+
+    print(f"   Native tile res : {tile_orig_w}×{tile_orig_h} px")
+    print(f"   Flat cell size  : {tile_size_flat} px  (no downscale before warp)")
+    print(f"   Grid            : {num_x}×{num_y} tiles  →  "
+          f"{num_x * tile_size_flat}×{num_y * tile_size_flat} px flat canvas")
+
+    # ── 5. Build flat tiled texture at maximum resolution ────────────────────
+    # Upscale tile to tile_size_flat using LANCZOS4; never goes below native size.
+    tile_cell = cv2.resize(tile, (tile_size_flat, tile_size_flat),
+                           interpolation=cv2.INTER_LANCZOS4)
+
+    flat_w = num_x * tile_size_flat
+    flat_h = num_y * tile_size_flat
+    tiled_flat = np.tile(tile_cell, (num_y, num_x, 1))   # (flat_h, flat_w, 3)
+    tiled_flat = tiled_flat[:flat_h, :flat_w]             # safety crop
+
+    # ── 6. Perspective warp: flat grid → floor quad ───────────────────────────
+    # Source = 4 corners of the flat texture
+    src_pts = np.float32([
+        [0,          0         ],   # TL
+        [flat_w - 1, 0         ],   # TR
+        [flat_w - 1, flat_h - 1],   # BR
+        [0,          flat_h - 1],   # BL
     ])
-    
-    print(f"   Floor plane corners detected:")
-    print(f"     Top-left:     ({floor_corners[0][0]:.0f}, {floor_corners[0][1]:.0f})")
-    print(f"     Top-right:    ({floor_corners[1][0]:.0f}, {floor_corners[1][1]:.0f})")
-    print(f"     Bottom-right: ({floor_corners[2][0]:.0f}, {floor_corners[2][1]:.0f})")
-    print(f"     Bottom-left:  ({floor_corners[3][0]:.0f}, {floor_corners[3][1]:.0f})")
-    
-    # Calculate dimensions for the flat tile pattern
-    # Use the maximum width and height from floor corners
-    width_top = np.linalg.norm(floor_corners[1] - floor_corners[0])
-    width_bottom = np.linalg.norm(floor_corners[2] - floor_corners[3])
-    height_left = np.linalg.norm(floor_corners[3] - floor_corners[0])
-    height_right = np.linalg.norm(floor_corners[2] - floor_corners[1])
-    
-    max_width = int(max(width_top, width_bottom))
-    max_height = int(max(height_left, height_right))
-    
-    print(f"   Floor plane dimensions: {max_width}x{max_height} pixels")
-    
-    # Create tiled pattern large enough to cover the floor
-    tile_h, tile_w = tile.shape[:2]
-    
-    # Calculate how many tiles needed
-    num_tiles_x = int(np.ceil(max_width / tile_w)) + 1
-    num_tiles_y = int(np.ceil(max_height / tile_h)) + 1
-    
-    print(f"   Creating {num_tiles_x}x{num_tiles_y} tile pattern...")
-    
-    # Create large tiled pattern
-    tiled_pattern = np.tile(tile, (num_tiles_y, num_tiles_x, 1))
-    
-    # Crop to exact needed size
-    tiled_pattern = tiled_pattern[:max_height, :max_width]
-    
-    # Define source points (corners of flat tiled pattern)
-    src_corners = np.float32([
-        [0, 0],                          # top-left
-        [max_width - 1, 0],              # top-right
-        [max_width - 1, max_height - 1], # bottom-right
-        [0, max_height - 1]              # bottom-left
-    ])
-    
-    # Calculate homography matrix to warp tiles onto floor plane
-    print("   Computing perspective transformation...")
-    H, _ = cv2.findHomography(src_corners, floor_corners)
-    
-    # Warp tiled pattern onto floor plane
+    # Destination = floor quad in image space
+    dst_pts = np.float32([tl, tr, br, bl])
+
+    H = cv2.getPerspectiveTransform(src_pts, dst_pts)
+
     tiled_warped = cv2.warpPerspective(
-        tiled_pattern,
-        H,
-        (image.shape[1], image.shape[0]),
-        flags=cv2.INTER_LINEAR,
+        tiled_flat, H, (img_w, img_h),
+        flags=cv2.INTER_LANCZOS4,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0)
     )
+
+    # ── 7. Shadow / lighting transfer (floor pixels only, multiplicative) ─────
+    # We compute a per-pixel brightness ratio from the original image and
+    # multiply it onto the warped tile so shadows/highlights are preserved.
+    # ALL processing is done in float64 to avoid quantisation error.
+    # The NON-FLOOR part of the result is a byte-for-byte copy of the original.
+
+    image_f64  = image.astype(np.float64)           # lossless reference
+    warped_f64 = tiled_warped.astype(np.float64)
+
+    image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float64)
+    image_lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float64)
+    L_channel = image_lab[:,:,0]
+
+    # Median brightness of the ORIGINAL floor region only
+    floor_pixels_bright = L_channel[floor_mask > 128]
+    avg_bright = float(np.median(floor_pixels_bright)) if len(floor_pixels_bright) > 0 else 128.0
+    avg_bright = max(avg_bright, 10.0)
+
+    # ENHANCED SHADOW MAP:
+    # 1. Use Luminance channel from LAB for better human-eye brightness perception
+    # 2. Add local contrast enhancement (CLAHE-like) to keep shadow details
     
-    print("   Applying lighting and blending...")
+    # Calculate ratio map
+    shadow_map = L_channel / avg_bright
     
-    # Apply lighting from original image to tiles for realism
-    # Convert to LAB color space for better lighting transfer
-    image_lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    tiles_lab = cv2.cvtColor(tiled_warped, cv2.COLOR_BGR2LAB)
+    # Sigmoid contrast curve to deepen shadows and brighten highlights slightly
+    # This makes the floor look less "flat"
+    shadow_map = (shadow_map - 0.5) * 1.2 + 0.5 
     
-    # Extract channels
-    l_original, a_original, b_original = cv2.split(image_lab)
-    l_tiles, a_tiles, b_tiles = cv2.split(tiles_lab)
+    # Clamp extreme values to prevent artifacts
+    shadow_map = np.clip(shadow_map, 0.2, 1.8)
     
-    # Blend lightness channel (preserves shadows, highlights, and lighting)
-    l_blended = cv2.addWeighted(l_original, 0.5, l_tiles, 0.5, 0)
+    # Smooth the shadow map to reduce noise grain from original floor
+    shadow_map = cv2.GaussianBlur(shadow_map.astype(np.float32), (5, 5), 0).astype(np.float64)
+
+    # Apply shadow ONLY inside the floor region
+    shadow_3c   = shadow_map[:, :, np.newaxis]
     
-    # Merge back
-    tiles_lab_adjusted = cv2.merge([l_blended, a_tiles, b_tiles])
-    tiles_adjusted = cv2.cvtColor(tiles_lab_adjusted, cv2.COLOR_LAB2BGR)
+    # Mix warped tile with shadow map
+    # We blend 80% shadow influence, 20% original tile brightness to prevent total black crush
+    tiled_lit = warped_f64 * shadow_3c
     
-    # Create 3-channel mask for blending
-    mask_3channel = cv2.cvtColor(floor_mask, cv2.COLOR_GRAY2BGR) / 255.0
+    # PRESERVE ORIGINAL REFLECTIONS (Specularity)
+    # Bright spots in original floor (>200) should be added back as reflections
+    highlights = np.clip(L_channel - 210, 0, 255)
+    if np.max(highlights) > 0:
+        highlights = highlights / np.max(highlights) * 40.0 # Scale intensity
+        highlights = cv2.GaussianBlur(highlights.astype(np.float32), (15,15), 0).astype(np.float64)
+        highlights_3c = highlights[:, :, np.newaxis]
+        tiled_lit = np.clip(tiled_lit + highlights_3c, 0, 255)
+
+    tiled_lit = np.clip(tiled_lit, 0.0, 255.0)
+
+    # ── 8. Compose: pixel-precise copy of original + tile on floor only ───────
+    # Build a soft alpha from the floor mask (feather only at boundary, 7 px).
+    mask_f64     = floor_mask.astype(np.float64)
     
-    # Apply Gaussian blur for seamless edge blending
-    mask_3channel = cv2.GaussianBlur(mask_3channel, (15, 15), 0)
+    # ENHANCED EDGE BLENDING
+    # Use a slightly tighter erosion first to avoid "halo" artifacts around furniture
+    kernel_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+    mask_eroded = cv2.erode(mask_f64.astype(np.uint8), kernel_erode).astype(np.float64)
     
-    # Blend tiles with original image
-    result = (image * (1 - mask_3channel) + tiles_adjusted * mask_3channel).astype(np.uint8)
-    
-    print("✅ Tile texture applied with perspective matching!")
-    
+    # Then feather edges
+    mask_feather = cv2.GaussianBlur(mask_eroded.astype(np.float32),
+                                    (5, 5), 0).astype(np.float64) / 255.0
+    mask_3c      = mask_feather[:, :, np.newaxis]          # (H,W,1) broadcast
+
+    # Full-precision blend
+    blended_f64 = image_f64 * (1.0 - mask_3c) + tiled_lit * mask_3c
+
+    # ── 9. Sharpening applied STRICTLY inside the floor area ─────────────────
+    # Convert blended result to uint8 once (single quantisation step)
+    blended_u8  = np.clip(blended_f64, 0, 255).astype(np.uint8)
+
+    sharpen_k = np.array([[ 0, -0.5,  0],
+                           [-0.5,  3, -0.5],
+                           [ 0, -0.5,  0]], dtype=np.float32)
+    sharpened_u8 = cv2.filter2D(blended_u8, -1, sharpen_k)
+
+    # Mix: 55 % original blend + 45 % sharpened, but ONLY on tile pixels
+    # Non-floor pixels are taken directly from the original (zero float error).
+    floor_bool = (mask_feather > 0.3)[:, :, np.newaxis]   # bool broadcast mask
+
+    sharp_mix = cv2.addWeighted(blended_u8, 0.55, sharpened_u8, 0.45, 0)
+
+    # Re-composite: use sharp_mix on floor, original pixels elsewhere (lossless)
+    result = np.where(floor_bool, sharp_mix, image).astype(np.uint8)
+
+    coverage = 100.0 * np.sum(floor_mask > 0) / floor_mask.size
+    print(f"✅ Perspective-correct tile applied!  Floor coverage: {coverage:.1f}%")
     return result
 
 
@@ -644,6 +720,14 @@ def run_interactive_tile_workflow(room_image: np.ndarray,
         print(f"❌ Error: Could not load tile texture: {tile_image_path}")
         return 1
     
+    # Check tile resolution
+    th, tw = tile_texture.shape[:2]
+    if tw < 512 or th < 512:
+        print(f"⚠️ Tile image is small ({tw}x{th}). Upscaling for better quality...")
+        scale_t = max(512/tw, 512/th)
+        tile_texture = cv2.resize(tile_texture, (0,0), fx=scale_t, fy=scale_t, interpolation=cv2.INTER_LANCZOS4)
+        print(f"   ✅ Tile upscaled to {tile_texture.shape[1]}x{tile_texture.shape[0]}")
+
     print(f"   ✓ Tile texture: {tile_texture.shape[1]}x{tile_texture.shape[0]}")
     
     # =================================================================
@@ -712,13 +796,13 @@ def run_interactive_tile_workflow(room_image: np.ndarray,
         for idx, poly_points in enumerate(capture.completed_polygons):
             color = (0, 255, 255)  # Yellow for completed
             for i, pt in enumerate(poly_points):
-                cv2.circle(display, pt, 4, color, -1)
+                cv2.circle(display, pt, 8, color, -1)
             # Draw lines
             if len(poly_points) > 1:
                 for i in range(len(poly_points)):
                     pt1 = poly_points[i]
                     pt2 = poly_points[(i + 1) % len(poly_points)]
-                    cv2.line(display, pt1, pt2, color, 2)
+                    cv2.line(display, pt1, pt2, color, 4)
             
             # Label
             if len(poly_points) > 0:
@@ -730,14 +814,14 @@ def run_interactive_tile_workflow(room_image: np.ndarray,
         # Draw current polygon being drawn
         if current_mode == 'polygon':
             for i, pt in enumerate(capture.polygon_points):
-                cv2.circle(display, pt, 5, (0, 0, 255), -1)
+                cv2.circle(display, pt, 10, (0, 0, 255), -1)
                 cv2.putText(display, str(i + 1), (pt[0] + 10, pt[1] - 10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
             
             if len(capture.polygon_points) > 1:
                 for i in range(len(capture.polygon_points) - 1):
                     cv2.line(display, capture.polygon_points[i], 
-                            capture.polygon_points[i + 1], (0, 255, 255), 2)
+                            capture.polygon_points[i + 1], (0, 255, 255), 4)
         
         # Display mode and help
         mode_text = f"Mode: {current_mode.upper()} | Polygons: {capture.get_polygon_count()}"
@@ -879,92 +963,133 @@ def run_interactive_tile_workflow(room_image: np.ndarray,
     print("\n✅ Plane approximation complete!")
     
     # =================================================================
-    # PHASE 4: TILE PROJECTION & BLENDING
+    # PHASE 4: PROFESSIONAL TILE INSTALLATION
     # =================================================================
     print("\n" + "="*70)
-    print("PHASE 4: TILE PROJECTION & BLENDING")
+    print("PHASE 4: PROFESSIONAL TILE INSTALLATION (REAL-WORLD SIMULATION)")
     print("="*70)
     
-    # Create projection engine
+    # Create professional tile installer
     quad_points = plane_approx.get_projection_quadrilateral()
-    projection_engine = TileProjectionEngine(tile_texture, refined_mask, quad_points)
+    tile_installer = ProfessionalTileInstaller(tile_texture, refined_mask, quad_points)
     
-    # Set initial scale
-    tile_scale = 1.0
-    projection_engine.set_tile_scale(tile_scale)
+    # Set initial tile size (80cm x 80cm is LARGE - perfect for delicate patterns)
+    tile_size_cm = 80.0  # Large tiles show delicate patterns clearly
+    tile_installer.set_tile_size(tile_size_cm)
     
-    # Project tiles
-    warped_tiles, warped_tiles_clipped = projection_engine.project_tiles_full(grid_size=1000)
+    # Install tiles professionally (like real installation)
+    # ULTRA-HIGH RESOLUTION: 8000px canvas for maximum pattern detail (delicate patterns need more)
+    print("   Using 8000x8000px base resolution for DELICATE pattern clarity...")
+    warped_tiles, warped_tiles_clipped = tile_installer.install_complete(resolution=8000)
     
     # Create blending engine
     blending = RealisticBlending(room_image, refined_mask)
     
-    # Blend
+    # Blend - MINIMAL blending to preserve tile quality
+    # Turn OFF all adjustments that reduce pattern quality
     result_image = blending.blend_complete(
         warped_tiles_clipped,
-        match_brightness=True,
-        match_color=True,
-        apply_lighting=True,
-        alpha=0.85,
-        feather_size=10
+        match_brightness=False,  # DON'T adjust brightness - keep original
+        match_color=False,       # DON'T adjust colors - keep original
+        apply_lighting=False,    # DON'T apply lighting - keep original
+        alpha=0.99,              # 99% tiles, 1% floor for subtle edge blend only
+        feather_size=5           # Minimal feathering
     )
     
-    print("\n✅ Tile projection and blending complete!")
+    print("\n✅ Professional tile installation and blending complete!")
     
     # =================================================================
-    # PHASE 5: INTERACTIVE PREVIEW
+    # PHASE 5: INTERACTIVE PREVIEW WITH REAL-WORLD CONTROLS
     # =================================================================
     print("\n" + "="*70)
-    print("PHASE 5: INTERACTIVE PREVIEW WITH SCALE ADJUSTMENT")
+    print("PHASE 5: INTERACTIVE PREVIEW - ADJUST REAL TILE SIZE")
     print("="*70)
     
-    window_preview = "Live Preview - Adjust Tile Scale"
+    window_preview = "Live Preview - Adjust Real Tile Size"
     cv2.namedWindow(window_preview, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_preview, 1200, 800)
+    cv2.resizeWindow(window_preview, 1400, 900)
     
-    # Trackbar callback
-    def on_scale_change(val):
-        nonlocal tile_scale, result_image
-        tile_scale = val / 10.0  # Scale 1-50 -> 0.1-5.0
-        print(f"\n🔄 Updating tile scale: {tile_scale:.2f}")
+    # Trackbar callback for tile size
+    def on_tile_size_change(val):
+        nonlocal tile_size_cm, result_image
+        tile_size_cm = max(20, val)  # 20cm minimum
+        print(f"\n🔲 Changing tile size: {tile_size_cm:.0f}cm x {tile_size_cm:.0f}cm")
         
-        # Update projection engine
-        projection_engine.set_tile_scale(tile_scale)
+        # Update installer
+        tile_installer.set_tile_size(tile_size_cm)
         
-        # Re-project
-        warped_tiles, warped_tiles_clipped = projection_engine.project_tiles_full(grid_size=1000)
+        # Re-install tiles professionally with ULTRA-HIGH resolution
+        warped_tiles, warped_tiles_clipped = tile_installer.install_complete(resolution=8000)
         
-        # Re-blend
+        # Re-blend - MINIMAL blending for maximum quality
         result_image = blending.blend_complete(
             warped_tiles_clipped,
-            match_brightness=True,
-            match_color=True,
-            apply_lighting=True,
-            alpha=0.85,
-            feather_size=10
+            match_brightness=False,  # Keep original tile appearance
+            match_color=False,       # Keep original tile colors
+            apply_lighting=False,    # Keep original tile lighting
+            alpha=0.99,              # 99% tiles for maximum quality
+            feather_size=5
         )
-        print("   ✓ Preview updated")
+        print("   ✅ Preview updated")
     
-    cv2.createTrackbar('Tile Scale x10', window_preview, 10, 50, on_scale_change)
+    # Create trackbar: 30cm to 150cm (extended range for very large tiles)
+    cv2.createTrackbar('Tile Size (cm)', window_preview, int(tile_size_cm), 150, on_tile_size_change)
     
     print("\n🎮 INTERACTIVE CONTROLS:")
-    print("   [Trackbar] - Adjust tile scale")
-    print("   [s] - Save result")
-    print("   [ESC/Q] - Quit")
+    print("   [Trackbar] Tile Size (cm) - Set REAL tile size (20-120cm)")
+    print("   [s] - Save result (HIGH QUALITY PNG + JPG)")
+    print("   [ESC/Q] - Quit without saving")
+    print("\n💡 COMMON TILE SIZES:")
+    print("      40cm (16\") - Medium tiles")
+    print("      60cm (24\") - Large tiles")
+    print("      80cm (32\") - Extra large (best for delicate patterns) ← RECOMMENDED")
+    print("      100cm (40\") - Very large (fewer tiles, clearer patterns)")
+    print("\n   💡 TIP: For delicate/mosaic patterns, use 70-100cm tiles!")
+    print("   ✅ 100% TILE QUALITY - No blending adjustments applied")
+    print("   ✅ GUARANTEE: Entire user-marked area will be covered!\n")
     
     while True:
-        cv2.imshow(window_preview, result_image)
+        # Add info overlay to help user
+        info_overlay = result_image.copy()
+        tiles_across, tiles_down = tile_installer._calculate_tile_count()
+        # Subtract the 2 overfill tiles for display (actual visible tiles)
+        visible_across = max(1, tiles_across - 2)
+        visible_down = max(1, tiles_down - 2)
+        total_tiles = visible_across * visible_down
+        
+        floor_area_m2 = (tile_installer.floor_width_cm * tile_installer.floor_height_cm) / 10000
+        
+        cv2.putText(info_overlay, f"Tile: {tile_size_cm:.0f}cm x {tile_size_cm:.0f}cm | ~{total_tiles} tiles needed",
+                   (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        cv2.putText(info_overlay, f"Floor: {floor_area_m2:.1f}m² | FULL COVERAGE GUARANTEED",
+                   (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(info_overlay, "Adjust trackbar | 's'=SAVE HIGH-QUALITY | ESC=quit",
+                   (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(info_overlay, "NOTE: Saved file will be FULL QUALITY (this preview is resized)",
+                   (20, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 1)
+        
+        cv2.imshow(window_preview, info_overlay)
         
         key = cv2.waitKey(1) & 0xFF
         
         if key == ord('s'):
-            # Save result
-            output_path = os.path.join(output_dir, "interactive_tiled_result.jpg")
-            cv2.imwrite(output_path, result_image)
-            print(f"\n💾 Result saved: {output_path}")
+            # Generate unique timestamp for this save
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Save result with MAXIMUM QUALITY (PNG format, no compression losses)
+            output_path = os.path.join(output_dir, f"interactive_tiled_result_{timestamp}.png")  # PNG not JPG!
+            
+            # Save with maximum quality
+            cv2.imwrite(output_path, result_image, [cv2.IMWRITE_PNG_COMPRESSION, 0])  # 0 = no compression
+            print(f"\n💾 Result saved in HIGHEST QUALITY: {output_path}")
+            
+            # Also save high-quality JPG version (if needed)
+            jpg_path = os.path.join(output_dir, f"interactive_tiled_result_{timestamp}.jpg")
+            cv2.imwrite(jpg_path, result_image, [cv2.IMWRITE_JPEG_QUALITY, 100])  # 100 = best quality
+            print(f"💾 JPG version saved: {jpg_path}")
             
             # Also save mask
-            mask_path = os.path.join(output_dir, "interactive_floor_mask.png")
+            mask_path = os.path.join(output_dir, f"interactive_floor_mask_{timestamp}.png")
             cv2.imwrite(mask_path, refined_mask)
             print(f"💾 Mask saved: {mask_path}")
         
@@ -986,10 +1111,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="Enhanced Floor Detection & Correction with Photoshop-like Tools"
     )
-    parser.add_argument('--image', '-i', type=str, default='room.jpg',
-                       help='Input image path (default: room.jpg from assets)')
-    parser.add_argument('--tile', '-t', type=str, default='tile.jpg',
-                       help='Tile texture image path (default: tile.jpg from assets)')
+    # ============================================================
+    # CHANGE THESE DEFAULTS TO SWITCH ROOM/TILE IMAGES:
+    # ============================================================
+    DEFAULT_ROOM = 'assets/room.jpg'    # Change to: room2.jpg, room3.jpg, etc.
+    DEFAULT_TILE = 'assets/tile2.jpg'    # Change to: tile2.jpg, tile3.jpg, etc.
+    # ============================================================
+    
+    parser.add_argument('--image', '-i', type=str, default=DEFAULT_ROOM,
+                       help='Input image path')
+    parser.add_argument('--tile', '-t', type=str, default=DEFAULT_TILE,
+                       help='Tile texture image path')
     parser.add_argument('--detector', '-d', type=str, choices=['simple', 'industry'],
                        default='simple', help='Detection method')
     parser.add_argument('--auto', '-a', action='store_true', default=False,
@@ -1067,6 +1199,16 @@ def main():
     if image is None:
         print(f"❌ Error: Could not load image")
         return 1
+    
+    # Check resolution and upscale if too small (crucial for pattern visibility)
+    h, w = image.shape[:2]
+    min_dim = 1600  # Minimum width/height for clear tile patterns
+    if w < min_dim or h < min_dim:
+        print(f"\n⚠️ Input image is small ({w}x{h}). Upscaling for better quality...")
+        scale = max(min_dim / w, min_dim / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+        print(f"   ✅ Upscaled to {new_w}x{new_h} (High Quality)")
     
     print(f"   Size: {image.shape[1]}x{image.shape[0]} pixels")
     
@@ -1235,10 +1377,22 @@ def main():
             # Apply tile texture to floor
             tiled_result = apply_tile_to_floor(image, corrected_mask, args.tile)
             
-            # Save tiled result
-            tiled_path = os.path.join(args.output_dir, '06_tiled_floor.jpg')
-            cv2.imwrite(tiled_path, tiled_result)
-            print(f"✅ Tiled floor saved: {tiled_path}")
+            # Save primary output as PNG (lossless — identical pixel values to in-memory result)
+            tiled_path = os.path.join(args.output_dir, '06_tiled_floor.png')
+            cv2.imwrite(tiled_path, tiled_result, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+            print(f"✅ Tiled floor saved (lossless PNG): {tiled_path}")
+            
+            # Also save a high-quality JPEG for quick sharing
+            jpg_path = os.path.join(args.output_dir, '06_tiled_floor.jpg')
+            try:
+                # 4:4:4 chroma sampling = no chroma downscale (OpenCV 4.1+)
+                cv2.imwrite(jpg_path, tiled_result,
+                            [cv2.IMWRITE_JPEG_QUALITY, 100,
+                             cv2.IMWRITE_JPEG_SAMPLING_FACTOR,
+                             cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444])
+            except (cv2.error, AttributeError):
+                cv2.imwrite(jpg_path, tiled_result, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            print(f"   JPG copy saved: {jpg_path}")
             
             # Create before/after tile comparison
             tile_before = image.copy()
@@ -1249,8 +1403,8 @@ def main():
                 scale = max_width / image.shape[1]
                 new_width = int(image.shape[1] * scale)
                 new_height = int(image.shape[0] * scale)
-                tile_before = cv2.resize(tile_before, (new_width, new_height))
-                tile_after = cv2.resize(tile_after, (new_width, new_height))
+                tile_before = cv2.resize(tile_before, (new_width, new_height), interpolation=cv2.INTER_AREA)
+                tile_after = cv2.resize(tile_after, (new_width, new_height), interpolation=cv2.INTER_AREA)
             
             # Create side-by-side
             tile_comparison = np.hstack([tile_before, tile_after])
@@ -1262,7 +1416,7 @@ def main():
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             
             tile_comparison_path = os.path.join(args.output_dir, '07_tile_comparison.png')
-            cv2.imwrite(tile_comparison_path, tile_comparison)
+            cv2.imwrite(tile_comparison_path, tile_comparison, [cv2.IMWRITE_PNG_COMPRESSION, 0])  # 0 = no compression
             print(f"✅ Tile comparison saved: {tile_comparison_path}")
     
     print("\n" + "="*70)

@@ -40,61 +40,112 @@ class TileProjectionEngine:
         
         self.height, self.width = mask.shape[:2]
         
-        # Tile parameters (can be adjusted)
-        self.tile_scale = 1.0
-        self.grout_width = 2
-        self.grout_color = (180, 180, 180)
+        # PROFESSIONAL APPROACH: Calculate real floor dimensions
+        floor_area_pixels = np.count_nonzero(mask)
+        floor_width_px = np.max(quad_points[:, 0]) - np.min(quad_points[:, 0])
+        floor_height_px = np.max(quad_points[:, 1]) - np.min(quad_points[:, 1])
         
-        print("✅ Tile projection engine initialized")
+        # Assume standard room: 1 pixel = ~0.5 cm in real world
+        # This gives us realistic floor dimensions
+        self.pixels_per_cm = 2.0  # 2 pixels = 1 cm
+        self.floor_width_cm = floor_width_px / self.pixels_per_cm
+        self.floor_height_cm = floor_height_px / self.pixels_per_cm
+        
+        # Real-world tile sizes in cm (common sizes)
+        # 30x30cm, 40x40cm, 45x45cm, 60x60cm are standard
+        self.tile_size_cm = 45.0  # Default: 45cm x 45cm tiles (18 inches)
+        
+        # Grout/spacing between tiles (typically 2-5mm in real world)
+        self.grout_width_cm = 0.3  # 3mm grout line
+        self.grout_color = (220, 220, 220)  # Light gray grout
+        
+        # Tile installation parameters
+        self.start_corner = 'bottom-left'  # Start installation from here
+        self.cut_threshold = 0.3  # Cut tiles smaller than 30% are replaced
+        
+        print("✅ Professional tile installation engine initialized")
+        print(f"   Floor dimensions: {self.floor_width_cm:.1f}cm x {self.floor_height_cm:.1f}cm")
+        print(f"   Floor area: {(self.floor_width_cm * self.floor_height_cm / 10000):.2f} square meters")
+        print(f"   Tile size: {self.tile_size_cm:.0f}cm x {self.tile_size_cm:.0f}cm")
+        print(f"   Grout width: {self.grout_width_cm * 10:.1f}mm")
     
-    def set_tile_scale(self, scale: float):
+    def set_tile_size(self, size_cm: float):
         """
-        Set tile scale factor
+        Set real-world tile size in centimeters (PROFESSIONAL CONTROL)
         
         Args:
-            scale: Scale factor (1.0 = normal, >1 = larger tiles, <1 = smaller tiles)
+            size_cm: Tile size in cm (common: 30, 40, 45, 60, 80)
         """
-        self.tile_scale = max(0.1, min(5.0, scale))
-        print(f"📏 Tile scale set to: {self.tile_scale:.2f}")
+        self.tile_size_cm = max(20.0, min(120.0, size_cm))
+        tiles_across = self.floor_width_cm / (self.tile_size_cm + self.grout_width_cm)
+        tiles_down = self.floor_height_cm / (self.tile_size_cm + self.grout_width_cm)
+        total_tiles = int(tiles_across) * int(tiles_down)
+        print(f"🔲 Tile size set to: {self.tile_size_cm:.0f}cm x {self.tile_size_cm:.0f}cm")
+        print(f"   Estimated tiles needed: ~{total_tiles} tiles ({tiles_across:.1f} across x {tiles_down:.1f} down)")
     
-    def set_grout_properties(self, width: int, color: Tuple[int, int, int]):
+    def set_grout_width(self, width_mm: float):
         """
-        Set grout line properties
+        Set grout line width in millimeters
         
         Args:
-            width: Grout line width in pixels
+            width_mm: Grout width in mm (typical: 2-5mm)
+        """
+        self.grout_width_cm = width_mm / 10.0
+        print(f"🎨 Grout width set to: {width_mm:.1f}mm")
+    
+    def get_tile_count(self) -> Tuple[int, int]:
+        """
+        Calculate how many tiles fit on the floor
+        
+        Returns:
+            Tuple of (tiles_across, tiles_down)
+        """
+        tile_plus_grout = self.tile_size_cm + self.grout_width_cm
+        tiles_across = int(np.ceil(self.floor_width_cm / tile_plus_grout))
+        tiles_down = int(np.ceil(self.floor_height_cm / tile_plus_grout))
+        return tiles_across, tiles_down
+    
+    def set_grout_color(self, color: Tuple[int, int, int]):
+        """
+        Set grout color
+        
+        Args:
             color: Grout color (B, G, R)
         """
-        self.grout_width = width
         self.grout_color = color
-        print(f"🎨 Grout: width={width}px, color={color}")
+        print(f"🎨 Grout color set to: RGB{color}")
     
-    def generate_tile_grid(self, 
-                          grid_width: int = 1000,
-                          grid_height: int = 1000,
-                          tile_size: int = 100) -> np.ndarray:
+    def install_tiles_professionally(self) -> np.ndarray:
         """
         Generate a repeating tile grid in top-down view
         
         Args:
             grid_width: Width of grid
             grid_height: Height of grid
-            tile_size: Size of each tile in pixels
+            tile_size: Size of each tile in pixels (already scaled)
             
         Returns:
             Tiled image (BGR)
         """
         print("🔲 Generating tile grid...")
+        print(f"   Grid size: {grid_width}x{grid_height}, Tile size: {tile_size}px")
         
-        # Adjust tile size by scale
-        tile_size = int(tile_size * self.tile_scale)
+        # Ensure tile size is large enough to show pattern detail
+        # Professional minimum: 200px for simple patterns, 400+ for detailed patterns
+        min_tile_size = 400
+        if tile_size < min_tile_size:
+            print(f"   ⚠️ Tile size {tile_size}px too small, using minimum {min_tile_size}px for pattern clarity")
+            tile_size = min_tile_size
         
-        # Resize tile texture with HIGH QUALITY interpolation
+        # Resize tile texture with HIGHEST QUALITY interpolation
+        # For detailed patterns, preserve as much detail as possible
         tile_resized = cv2.resize(
             self.tile_texture,
             (tile_size - self.grout_width, tile_size - self.grout_width),
-            interpolation=cv2.INTER_CUBIC
+            interpolation=cv2.INTER_LANCZOS4  # Highest quality interpolation
         )
+        
+        print(f"   ✅ Tile resized to: {tile_resized.shape[1]}x{tile_resized.shape[0]} (preserving detail)")
         
         # Create grid
         num_tiles_x = (grid_width + tile_size - 1) // tile_size + 1
@@ -140,12 +191,12 @@ class TileProjectionEngine:
         """
         print("🔄 Warping tiles to perspective...")
         
-        # Warp tile grid to image perspective with HIGH QUALITY interpolation
+        # Warp tile grid to image perspective with HIGHEST QUALITY interpolation
         warped = cv2.warpPerspective(
             tile_grid,
             inverse_matrix,
             (self.width, self.height),
-            flags=cv2.INTER_CUBIC,  # Changed from LINEAR to CUBIC for better quality
+            flags=cv2.INTER_LANCZOS4,  # Highest quality interpolation for best results
             borderMode=cv2.BORDER_CONSTANT
         )
         
@@ -189,8 +240,23 @@ class TileProjectionEngine:
         """
         print("🎬 Starting full tile projection...")
         
-        # Step 1: Generate tile grid
-        tile_size = int(80 * self.tile_scale)
+        # Step 1: Calculate optimal tile size (PROFESSIONAL APPROACH)
+        # Formula: grid_size / optimal_tile_count = tile size in grid space
+        # For detailed floral patterns, we need 6-10 tiles across the floor
+        base_tile_size = grid_size // self.optimal_tile_count
+        
+        # Apply user scaling
+        tile_size = int(base_tile_size * self.tile_scale)
+        
+        # Ensure minimum size for pattern visibility
+        tile_size = max(tile_size, 500)  # Professional minimum: 500px for detailed patterns
+        
+        print(f"   📊 Professional tile sizing:")
+        print(f"      Grid: {grid_size}x{grid_size}px")
+        print(f"      Target tiles across: {self.optimal_tile_count}")
+        print(f"      Calculated tile size: {tile_size}px")
+        print(f"      Scale factor: {self.tile_scale:.2f}")
+        
         tile_grid = self.generate_tile_grid(grid_size, grid_size, tile_size)
         
         # Step 2: Compute inverse perspective transform

@@ -13,7 +13,7 @@ import io
 # ================= CONFIG =================
 # Get your FREE API key from: https://deepai.org/machine-learning-model/text2img
 # Sign up is free and no billing required!
-DEEPAI_API_KEY = ""  # ⬅️ Get from https://deepai.org/
+DEEPAI_API_KEY = "7e44fd05-7507-4648-8655-ec07ef7fc870"  # ⬅️ Get from https://deepai.org/
 
 ROOM_IMAGE_PATH = "room.jpg"
 TILE_IMAGE_PATH = "tile.jpg"
