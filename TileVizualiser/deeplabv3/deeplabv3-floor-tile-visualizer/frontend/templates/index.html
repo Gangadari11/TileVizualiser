@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Floor Tile Visualizer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <i class="fas fa-th-large"></i>
+                <span>Floor Tile Visualizer</span>
+            </div>
+            <div class="header-actions">
+                <button id="helpBtn" class="btn btn-icon" title="Help">
+                    <i class="fas fa-question-circle"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Left Panel - Tools -->
+            <aside class="panel panel-left">
+                <div class="panel-section">
+                    <h3><i class="fas fa-upload"></i> Room Image</h3>
+                    <div class="upload-zone" id="roomUploadZone">
+                        <input type="file" id="roomInput" accept="image/*" hidden>
+                        <i class="fas fa-cloud-upload-alt upload-icon"></i>
+                        <p>Drop room image here or click to upload</p>
+                        <span class="upload-hint">Supports: JPG, PNG, WebP</span>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3><i class="fas fa-magic"></i> Floor Selection</h3>
+                    <div class="tool-buttons">
+                        <button class="btn btn-tool active" id="polygonTool" title="Polygon Selection">
+                            <i class="fas fa-draw-polygon"></i>
+                            <span>Polygon</span>
+                        </button>
+                        <button class="btn btn-tool" id="autoDetectBtn" title="Auto-Detect Floor">
+                            <i class="fas fa-wand-magic-sparkles"></i>
+                            <span>Auto-Detect</span>
+                        </button>
+                    </div>
+                    <div class="tool-info">
+                        <p id="toolInstructions">Click on the image to draw polygon around the floor area. Close the polygon by clicking near the first point.</p>
+                    </div>
+                    <div class="selection-actions">
+                        <button class="btn btn-secondary" id="clearSelectionBtn" disabled>
+                            <i class="fas fa-eraser"></i> Clear
+                        </button>
+                        <button class="btn btn-secondary" id="undoPointBtn" disabled>
+                            <i class="fas fa-undo"></i> Undo Point
+                        </button>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3><i class="fas fa-sliders-h"></i> Tile Settings</h3>
+                    <div class="setting-item">
+                        <label for="tileSizeSlider">Tile Size: <span id="tileSizeValue">80</span>cm</label>
+                        <input type="range" id="tileSizeSlider" min="30" max="150" value="80" step="5">
+                        <div class="setting-hints">
+                            <span>30cm</span>
+                            <span>150cm</span>
+                        </div>
+                    </div>
+                    <div class="setting-item">
+                        <label for="groutWidthSlider">Grout Width: <span id="groutWidthValue">2</span>mm</label>
+                        <input type="range" id="groutWidthSlider" min="0" max="10" value="2" step="0.5">
+                        <div class="setting-hints">
+                            <span>0mm</span>
+                            <span>10mm</span>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Center - Canvas Area -->
+            <section class="canvas-section">
+                <div class="canvas-container" id="canvasContainer">
+                    <div class="canvas-placeholder" id="canvasPlaceholder">
+                        <i class="fas fa-image"></i>
+                        <p>Upload a room image to get started</p>
+                    </div>
+                    <canvas id="mainCanvas"></canvas>
+                    <canvas id="overlayCanvas"></canvas>
+                </div>
+                <div class="canvas-toolbar">
+                    <div class="zoom-controls">
+                        <button class="btn btn-icon" id="zoomOutBtn" title="Zoom Out">
+                            <i class="fas fa-search-minus"></i>
+                        </button>
+                        <span id="zoomLevel">100%</span>
+                        <button class="btn btn-icon" id="zoomInBtn" title="Zoom In">
+                            <i class="fas fa-search-plus"></i>
+                        </button>
+                        <button class="btn btn-icon" id="zoomFitBtn" title="Fit to View">
+                            <i class="fas fa-expand"></i>
+                        </button>
+                    </div>
+                    <div class="canvas-info">
+                        <span id="imageInfo">No image loaded</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Panel - Tiles -->
+            <aside class="panel panel-right">
+                <div class="panel-section tiles-section">
+                    <h3><i class="fas fa-th"></i> Select Tile</h3>
+                    <div class="tile-upload">
+                        <input type="file" id="tileInput" accept="image/*" hidden>
+                        <button class="btn btn-secondary btn-full" id="uploadTileBtn">
+                            <i class="fas fa-plus"></i> Upload Custom Tile
+                        </button>
+                    </div>
+                    <div class="tiles-grid" id="tilesGrid">
+                        {% for tile in tiles %}
+                        <div class="tile-item" data-tile="{{ tile.name }}">
+                            <img src="{{ tile.thumbnail }}" alt="{{ tile.name }}">
+                            <span class="tile-name">{{ tile.name }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <div class="panel-section action-section">
+                    <button class="btn btn-primary btn-large btn-full" id="applyTileBtn" disabled>
+                        <i class="fas fa-paint-roller"></i>
+                        Apply Tile
+                    </button>
+                </div>
+            </aside>
+        </main>
+
+        <!-- Result Modal -->
+        <div class="modal" id="resultModal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2><i class="fas fa-check-circle"></i> Tile Applied Successfully!</h2>
+                    <button class="btn btn-icon modal-close" id="closeResultModal">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="result-preview">
+                        <img id="resultImage" src="" alt="Result">
+                    </div>
+                    <div class="result-actions">
+                        <button class="btn btn-primary" id="downloadResultBtn">
+                            <i class="fas fa-download"></i>
+                            Download Full Quality
+                        </button>
+                        <button class="btn btn-secondary" id="tryAgainBtn">
+                            <i class="fas fa-redo"></i>
+                            Try Different Tile
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Help Modal -->
+        <div class="modal" id="helpModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2><i class="fas fa-question-circle"></i> How to Use</h2>
+                    <button class="btn btn-icon modal-close" id="closeHelpModal">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <div class="modal-body help-content">
+                    <div class="help-step">
+                        <div class="step-number">1</div>
+                        <div class="step-content">
+                            <h4>Upload Room Image</h4>
+                            <p>Click the upload zone or drag and drop a photo of the room where you want to visualize tiles.</p>
+                        </div>
+                    </div>
+                    <div class="help-step">
+                        <div class="step-number">2</div>
+                        <div class="step-content">
+                            <h4>Select Floor Area</h4>
+                            <p>Use the polygon tool to click around the floor area, or use Auto-Detect for automatic floor detection.</p>
+                        </div>
+                    </div>
+                    <div class="help-step">
+                        <div class="step-number">3</div>
+                        <div class="step-content">
+                            <h4>Choose a Tile</h4>
+                            <p>Select from available tiles or upload your own tile texture image.</p>
+                        </div>
+                    </div>
+                    <div class="help-step">
+                        <div class="step-number">4</div>
+                        <div class="step-content">
+                            <h4>Adjust Settings & Apply</h4>
+                            <p>Customize tile size and grout width, then click "Apply Tile" to see the result!</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Overlay -->
+        <div class="loading-overlay" id="loadingOverlay">
+            <div class="loading-spinner">
+                <div class="spinner"></div>
+                <p id="loadingText">Processing...</p>
+            </div>
+        </div>
+
+        <!-- Toast Notifications -->
+        <div class="toast-container" id="toastContainer"></div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# Floor Tile Visualizer Frontend Requirements
+# ============================================
+
+# Web Framework
+flask>=2.0.0
+flask-cors>=3.0.0
+werkzeug>=2.0.0
+
+# Image Processing (already in parent project)
+opencv-python>=4.5.0
+numpy>=1.19.0
+
+# Computer Vision (already in parent project)
+scikit-image>=0.18.0
+scipy>=1.6.0
+
+# Optional: Production server
+gunicorn>=20.0.0
