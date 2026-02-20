@@ -335,9 +335,8 @@ class RealisticBlending:
         tile_lit_f64 = tile_bgr * shadow_3d
         
         # Tile receives highlights *additively* (gloss)
-        # Reduce intensity from 0.4 to 0.15 (subtle sheen instead of blown out mirror)
-        # Also clamp the max value to avoid total whiteout
-        tile_lit_f64 = tile_lit_f64 + (230.0 * specular_3d * 0.15)
+        # INCREASED intensity from 0.15 to 0.5 to match the goal image's shine
+        tile_lit_f64 = tile_lit_f64 + (230.0 * specular_3d * 0.5)
         
         tile_lit_f64 = np.clip(tile_lit_f64, 0.0, 255.0)
 

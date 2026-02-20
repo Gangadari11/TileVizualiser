@@ -88,10 +88,10 @@ class ProfessionalTileInstaller:
         self.floor_height_cm = floor_height_px / self.pixels_per_cm
         
         # Real-world tile parameters (standard sizes in cm)
-        # DEFAULT: LARGE tile size for delicate patterns to be visible
-        self.tile_size_cm = 80.0  # 80cm x 80cm (32 inches) - LARGE for delicate patterns
-        self.grout_width_cm = 0.3  # 3mm grout line (standard)
-        self.grout_color = (110, 105, 100)  # Dark cement gray grout - clearly visible
+        # DEFAULT: MASSIVE tile → only ~3 tiles across room = clear pattern, not busy
+        self.tile_size_cm = 200.0  # 200cm per tile (approx 3 visible per room width)
+        self.grout_width_cm = 0.2  # 2mm grout line (thinner = more premium)
+        self.grout_color = (130, 125, 120)  # Lighter gray for elegance
         
         # Installation parameters
         self.start_corner = 'bottom-left'  # Where to start laying tiles
@@ -102,14 +102,19 @@ class ProfessionalTileInstaller:
         print(f"   Default Tiles: {self.tile_size_cm:.0f}cm x {self.tile_size_cm:.0f}cm (LARGE for delicate patterns)")
         print(f"   Grout: {self.grout_width_cm * 10:.1f}mm")
     
-    def set_tile_size(self, size_cm: float):
+    def set_tile_size(self, size_cm: float = 120.0):
         """
         Set real-world tile size
         
         Args:
             size_cm: Tile size in cm (common: 30, 40, 45, 60, 80, 120)
         """
-        self.tile_size_cm = max(20.0, min(150.0, size_cm))
+        # FORCE 120cm minimum if user tries to set it small, to prevent "busy" look
+        if size_cm < 100.0:
+             print(f"⚠️  Small tile size {size_cm}cm detected. Forcing 150cm for LUXURY pattern visibility.")
+             size_cm = 150.0 # Bumping up default fallback too.
+             
+        self.tile_size_cm = max(20.0, min(600.0, size_cm)) # Increased max clamp to 600cm to allow massive patterns
         tiles_across, tiles_down = self._calculate_tile_count()
         total = tiles_across * tiles_down
         print(f"🔲 Tile size: {self.tile_size_cm:.0f}cm x {self.tile_size_cm:.0f}cm")
@@ -158,38 +163,60 @@ class ProfessionalTileInstaller:
         # Calculate tile dimensions - PRIORITIZE PATTERN VISIBILITY
         tiles_across, tiles_down = self._calculate_tile_count()
         
-        # CRITICAL: Calculate tile size to ensure pattern is ALWAYS visible
-        # For delicate patterns (circles, florals, mosaic), each tile needs 1000-1500px minimum
+        # INDUSTRIAL QUALITY STANDARD:
+        # For ANY room, regardless of input quality, we force ultra-high resolution
+        # rendering space. We disregard the input pixel density and create our own
+        # "perfect world" coordinate system where 1 tile = 2400 pixels minimum.
+        
+        # Base calculation
         tile_px_calculated = canvas_size // max(tiles_across, tiles_down)
         
-        # ENFORCE MINIMUM: 1200px per tile for delicate patterns (increased from 800px)
-        # This ensures overlapping circles, mosaics, etc. are clearly visible
-        tile_px = max(tile_px_calculated, 1200)
+        # FORCE MINIMUM: 2400px per tile.
+        # This is ~4x standard HD. This ensures even the tiniest mosaic details are captured.
+        tile_px = max(tile_px_calculated, 2400)
         
-        # If enforcing minimum makes canvas too small, increase canvas size
+        # Scale canvas to fit these massive tiles
+        # We don't care about memory usage here - quality is priority #1.
         required_canvas = tile_px * max(tiles_across, tiles_down)
         if required_canvas > canvas_size:
-            canvas_size = int(required_canvas * 1.3)  # 30% extra for safety
+            # Add 20% margin for perspective cropping safety
+            canvas_size = int(required_canvas * 1.2)
+            # Re-initialize canvas with new massive size
+            print(f"   🔼 Canvas AUTO-SCALED to {canvas_size}x{canvas_size}px for MAXIMUM FIDELITY")
             canvas = np.full((canvas_size, canvas_size, 3), self.grout_color, dtype=np.uint8)
-            print(f"   🔼 Canvas increased to {canvas_size}x{canvas_size}px for delicate pattern clarity")
         
-        grout_px = max(2, int(tile_px * self.grout_width_cm / self.tile_size_cm))
+        # Calculate grout relative to massive tile size (maintain ratio)
+        # Ensure it's never less than 6px so it doesn't disappear in distance
+        grout_px = max(6, int(tile_px * self.grout_width_cm / self.tile_size_cm))
+
+        print(f"   Canvas: {canvas_size}x{canvas_size}px (INDUSTRIAL QUALITY)")
+        print(f"   Tile Resolution: {tile_px}x{tile_px}px (Per single tile)")
+        print(f"   Grout Width: {grout_px}px")
         
-        print(f"   Canvas: {canvas_size}x{canvas_size}px (ultra-high res for delicate patterns)")
-        print(f"   Tile size in canvas: {tile_px}px (VERY LARGE for pattern detail)")
-        print(f"   Real-world tile: {tile_px / self.pixels_per_cm:.1f}cm equivalent")
-        print(f"   Grout in canvas: {grout_px}px")
-        print(f"   Laying {tiles_across}x{tiles_down} tiles (pattern will be CRYSTAL CLEAR)")
+        # INTELLIGENT TEXTURE ENHANCEMENT
+        # Before using the tile texture, we must enhance it because often user uploads blur.
+        tile_tex = self.tile_texture.copy()
         
-        # Resize tile texture with MAXIMUM quality - preserve every detail
-        # For complex patterns (geometric, floral), use LANCZOS4 and large size
-        print(f"   🎨 Resizing tile texture to {tile_px - grout_px}px (preserving detail)...")
+        # 1. Denoise first (remove compression artifacts from low-res upload)
+        tile_tex = cv2.fastNlMeansDenoisingColored(tile_tex, None, 3, 3, 7, 21)
+        
+        # 2. Upscale source tile if it's small (using Super-Res logic via Lanczos)
+        if tile_tex.shape[0] < tile_px:
+             print(f"   ✨ Upscaling source tile from {tile_tex.shape[0]}px to target {tile_px}px...")
+             tile_tex = cv2.resize(tile_tex, (tile_px, tile_px), interpolation=cv2.INTER_LANCZOS4)
+             
+        # 3. Apply Unsharp Masking for "Crunchy" details (Industrial look)
+        gaussian = cv2.GaussianBlur(tile_tex, (0, 0), 2.0)
+        tile_tex = cv2.addWeighted(tile_tex, 1.5, gaussian, -0.5, 0)
+        
+        # Resize final to exact needed dimensions with grout subtracted
+        tile_final_size = tile_px - grout_px
         tile_resized = cv2.resize(
-            self.tile_texture,
-            (tile_px - grout_px, tile_px - grout_px),
+            tile_tex,
+            (tile_final_size, tile_final_size),
             interpolation=cv2.INTER_LANCZOS4
         )
-        print(f"   ✅ Tile resized - pattern detail preserved at {tile_px - grout_px}px")
+        print(f"   ✅ Tile processed: Sharpness increased, Noise reduced, Resolution maximized")
         
         # INSTALL TILES - Row by row, like real installation
         # Cover ENTIRE canvas to ensure no gaps after perspective warp
@@ -221,12 +248,14 @@ class ProfessionalTileInstaller:
                     # Vertical Grout Line (Right side of previous tile)
                     if x > 0 and x < canvas_size:
                         # Shadow on left of grout (1px)
-                        cv2.line(canvas, (x-1, y), (x-1, min(y+tile_px, canvas_size)), grout_shadow, 1)
+                        # Make it sharper
+                        cv2.line(canvas, (x-1, y), (x-1, min(y+tile_px, canvas_size)), grout_shadow, 2)
                         
                     # Horizontal Grout Line (Bottom of previous tile)
                     if y > 0 and y < canvas_size:
                         # Shadow on top of grout (1px)
-                        cv2.line(canvas, (x, y-1), (min(x+tile_px, canvas_size), y-1), grout_shadow, 1)
+                        # Make it sharper
+                        cv2.line(canvas, (x, y-1), (min(x+tile_px, canvas_size), y-1), grout_shadow, 2)
 
                 
                 # Stop if completely outside canvas
@@ -236,31 +265,35 @@ class ProfessionalTileInstaller:
                 # Get tile (or cut portion)
                 current_tile = tile_resized.copy()
                 
-                # CUT TILE if at edge (like real installation)
-                if x_end > canvas_size:
-                    cut_width = canvas_size - x - grout_px
-                    if cut_width > tile_px * 0.1:  # Place even small cuts for coverage
-                        current_tile = current_tile[:, :cut_width]
-                        tiles_cut += 1
-                        x_end = canvas_size
-                    else:
-                        continue
+                # CUT TILE if at edge (Industrial logic: cover completely)
+                valid_placement = True
                 
-                if y_end > canvas_size:
-                    cut_height = canvas_size - y - grout_px
-                    if cut_height > tile_px * 0.1:  # Place even small cuts for coverage
+                # Handling overflow - just chop it off
+                if x + current_tile.shape[1] > canvas_size:
+                    cut_width = canvas_size - x
+                    if cut_width > 0:
+                         current_tile = current_tile[:, :cut_width]
+                         x_end = canvas_size
+                    else:
+                        valid_placement = False
+
+                if y + current_tile.shape[0] > canvas_size:
+                    cut_height = canvas_size - y
+                    if cut_height > 0:
                         current_tile = current_tile[:cut_height, :]
-                        tiles_cut += 1
                         y_end = canvas_size
                     else:
-                        continue
+                        valid_placement = False
                 
                 # PLACE TILE on canvas
-                try:
-                    tile_h, tile_w = current_tile.shape[:2]
-                    canvas[y:y+tile_h, x:x+tile_w] = current_tile
-                    tiles_placed += 1
-                except:
+                if valid_placement:
+                    try:
+                        tile_h, tile_w = current_tile.shape[:2]
+                        # Safe placement
+                        canvas[y:y+tile_h, x:x+tile_w] = current_tile
+                        tiles_placed += 1
+                    except:
+                        pass
                     pass
         
         print(f"   ✅ Installed: {tiles_placed} tiles on oversized canvas ({tiles_cut} edge tiles cut)")
@@ -304,6 +337,12 @@ class ProfessionalTileInstaller:
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=self.grout_color
         )
+        
+        # INDUSTRIAL QUALITY: Post-warp sharpening
+        # Warping (especially shrinking distant pixels) causes blur. We must counteract it.
+        print("   ✨ Applying post-warp industrial sharpening...")
+        warped_gaussian = cv2.GaussianBlur(warped, (0, 0), 1.5)
+        warped = cv2.addWeighted(warped, 1.4, warped_gaussian, -0.4, 0)
         
         print("   ✅ Perspective applied - entire marked area covered")
         return warped

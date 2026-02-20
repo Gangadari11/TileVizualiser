@@ -549,7 +549,7 @@ def apply_tile_to_floor(image: np.ndarray, floor_mask: np.ndarray, tile_path: st
     tile_orig_h, tile_orig_w = tile.shape[:2]
     tile_native = max(tile_orig_w, tile_orig_h)   # longest side of original texture
 
-    TILES_ACROSS_BOTTOM = 7   # realistic for a ~4 m wide room with ~60 cm tiles
+    TILES_ACROSS_BOTTOM = 2   # LARGE tiles: only 3 visible across = big, clear pattern
     target_size = int(bottom_width_px / TILES_ACROSS_BOTTOM)
 
     # CRITICAL: never downscale below the native tile resolution.
@@ -729,6 +729,23 @@ def run_interactive_tile_workflow(room_image: np.ndarray,
         print(f"   ✅ Tile upscaled to {tile_texture.shape[1]}x{tile_texture.shape[0]}")
 
     print(f"   ✓ Tile texture: {tile_texture.shape[1]}x{tile_texture.shape[0]}")
+    
+    # NEW: INTELLIGENT PATTERN DETECTION
+    # Analyzes tile to see if it's part of a larger pattern (e.g. circle quadrant)
+    try:
+        from src.utils.pattern_detector import PatternDetector
+        detector = PatternDetector(tile_texture)
+        final_tile, pattern_name = detector.analyze_optimal_pattern()
+        
+        # If we found a complex pattern, update the texture
+        if pattern_name != 'standard':
+            tile_texture = final_tile
+            print(f"   ✨ UPGRADED tile to {pattern_name.upper()} macro-pattern")
+            print(f"   ✨ New tile resolution: {tile_texture.shape[1]}x{tile_texture.shape[0]}")
+    except ImportError:
+        print("   ⚠️ Pattern detector module not found, skipping optimization.")
+    except Exception as e:
+        print(f"   ⚠️ Pattern detection failed: {e}")
     
     # =================================================================
     # PHASE 1: INTERACTIVE FLOOR CAPTURE (Multi-Polygon)
@@ -973,27 +990,27 @@ def run_interactive_tile_workflow(room_image: np.ndarray,
     quad_points = plane_approx.get_projection_quadrilateral()
     tile_installer = ProfessionalTileInstaller(tile_texture, refined_mask, quad_points)
     
-    # Set initial tile size (80cm x 80cm is LARGE - perfect for delicate patterns)
-    tile_size_cm = 80.0  # Large tiles show delicate patterns clearly
+    # Set initial tile size — USER REQUEST: few large tiles, clearly visible pattern
+    tile_size_cm = 500.0  # 200cm per tile = only ~3 tiles visible across room
     tile_installer.set_tile_size(tile_size_cm)
     
     # Install tiles professionally (like real installation)
     # ULTRA-HIGH RESOLUTION: 8000px canvas for maximum pattern detail (delicate patterns need more)
     print("   Using 8000x8000px base resolution for DELICATE pattern clarity...")
-    warped_tiles, warped_tiles_clipped = tile_installer.install_complete(resolution=8000)
+    warped_tiles, warped_tiles_clipped = tile_installer.install_complete(resolution=12000)
     
     # Create blending engine
     blending = RealisticBlending(room_image, refined_mask)
     
-    # Blend - MINIMAL blending to preserve tile quality
-    # Turn OFF all adjustments that reduce pattern quality
+    # Blend - INDUSTRIAL STANDARD BLENDING
+    # Turn ON subtle effects for realism (gloss, shadow integration) but keep alpha high
     result_image = blending.blend_complete(
         warped_tiles_clipped,
-        match_brightness=False,  # DON'T adjust brightness - keep original
-        match_color=False,       # DON'T adjust colors - keep original
-        apply_lighting=False,    # DON'T apply lighting - keep original
-        alpha=0.99,              # 99% tiles, 1% floor for subtle edge blend only
-        feather_size=5           # Minimal feathering
+        match_brightness=True,   # ENABLED: Match room brightness 
+        match_color=False,       # DISABLED: Keep tile true color
+        apply_lighting=False,    # DISABLED: We use AO shadow map in blend_complete internally
+        alpha=0.95,              # 95% opacity allows 5% of original floor texture/shadows to bleed through
+        feather_size=3           # Sharp edges
     )
     
     print("\n✅ Professional tile installation and blending complete!")
@@ -1115,7 +1132,7 @@ def main():
     # CHANGE THESE DEFAULTS TO SWITCH ROOM/TILE IMAGES:
     # ============================================================
     DEFAULT_ROOM = 'assets/room.jpg'    # Change to: room2.jpg, room3.jpg, etc.
-    DEFAULT_TILE = 'assets/tile2.jpg'    # Change to: tile2.jpg, tile3.jpg, etc.
+    DEFAULT_TILE = 'assets/tile5.jpg'    # Change to: tile2.jpg, tile3.jpg, etc.
     # ============================================================
     
     parser.add_argument('--image', '-i', type=str, default=DEFAULT_ROOM,
@@ -1201,14 +1218,25 @@ def main():
         return 1
     
     # Check resolution and upscale if too small (crucial for pattern visibility)
+    # ULTRA-HIGH QUALITY SETTINGS: Force minimum 2400px for crystal clarity
     h, w = image.shape[:2]
-    min_dim = 1600  # Minimum width/height for clear tile patterns
+    min_dim = 3000  # Increased for industrial quality
+    
     if w < min_dim or h < min_dim:
-        print(f"\n⚠️ Input image is small ({w}x{h}). Upscaling for better quality...")
+        print(f"\n⚠️ Input room image is small ({w}x{h}). Upscaling for detail...")
         scale = max(min_dim / w, min_dim / h)
         new_w, new_h = int(w * scale), int(h * scale)
         image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-        print(f"   ✅ Upscaled to {new_w}x{new_h} (High Quality)")
+        
+        # Apply smart sharpening after upscale to restore edges
+        sharpen_kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+        image = cv2.filter2D(image, -1, sharpen_kernel)
+        print(f"   ✅ Upscaled & Sharpened to {new_w}x{new_h} (Ultra-High Quality)")
+    else:
+        # Even if large enough, apply subtle sharpening for clarity
+        sharpen_kernel = np.array([[0,-1,0], [-1,5,-1], [0,-1,0]])
+        image = cv2.filter2D(image, -1, sharpen_kernel)
+        print(f"   ✅ Image enhanced for clarity ({w}x{h})")
     
     print(f"   Size: {image.shape[1]}x{image.shape[0]} pixels")
     
@@ -1374,8 +1402,68 @@ def main():
             print(f"⚠️ Warning: Tile image not found: {args.tile}")
             print("   Skipping tile application...")
         else:
-            # Apply tile texture to floor
-            tiled_result = apply_tile_to_floor(image, corrected_mask, args.tile)
+            # PROFESSIONAL INSTALLATION WORKFLOW (Ported from Interactive Mode)
+            print("\n🏭 STARTING INDUSTRIAL QUALITY TILE INSTALLATION...")
+            
+            # 1. Load Pattern Logic
+            tile_img = cv2.imread(args.tile)
+            
+            # NEW: Intelligent Pattern Detection
+            try:
+                from src.utils.pattern_detector import PatternDetector
+                detector = PatternDetector(tile_img)
+                final_tile, pattern_name = detector.analyze_optimal_pattern()
+                
+                if pattern_name != 'standard':
+                    tile_img = final_tile
+                    print(f"   ✨ UPGRADED to {pattern_name.upper()} macro-pattern")
+            except Exception as e:
+                print(f"   ⚠️ Auto-pattern detection skipped: {e}")
+
+            # 2. Approximate Floor Plane (Needed for Professional Installer)
+            # Create a simple quad approximation from the mask if not already done
+            from src.utils.plane_approximation import PlaneApproximation
+            plane_approx = PlaneApproximation(image, corrected_mask)
+            plane_approx.compute_convex_hull()
+            quad_points = plane_approx.compute_minimum_area_quad()
+            
+            # 3. Initialize Professional Installer
+            from src.utils.professional_tile_installer import ProfessionalTileInstaller
+            tile_installer = ProfessionalTileInstaller(tile_img, corrected_mask, quad_points)
+            
+            # Force Luxury Size
+            # USER REQUEST: fewer tiles, big and clearly visible pattern
+            base_tile_size_cm = 500.0  # 200cm per single tile = only ~3 tiles visible across room
+            
+            tile_size_target = base_tile_size_cm
+            
+            # If we detect a macro-pattern, we MUST verify the type to scale correctly.
+            # But even "standard" tiles might benefit from rotation if they have continuity.
+            if pattern_name != 'standard':
+                # If we made a 2x2 macro-pattern, double the size so individual tiles (quadrants) stay large
+                tile_size_target *= 2 # Result: 300cm macro block!
+                print(f"   ℹ️  Adjusting macro-tile size to {tile_size_target}cm (2x {base_tile_size_cm}cm tiles)")
+            else:
+                 # Even if standard, maybe the user wants it BIG.
+                 pass
+
+            tile_installer.set_tile_size(tile_size_target)
+            
+            # 4. Install & Warp
+            warped_tiles, warped_tiles_clipped = tile_installer.install_complete(resolution=8000)
+            
+            # 5. Realistic Blending
+            from src.utils.realistic_blending import RealisticBlending
+            blending = RealisticBlending(image, corrected_mask)
+            
+            tiled_result = blending.blend_complete(
+                warped_tiles_clipped,
+                match_brightness=True,
+                match_color=False,
+                apply_lighting=False,
+                alpha=0.95,
+                feather_size=3
+            )
             
             # Save primary output as PNG (lossless — identical pixel values to in-memory result)
             tiled_path = os.path.join(args.output_dir, '06_tiled_floor.png')
